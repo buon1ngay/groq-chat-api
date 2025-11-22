@@ -1,3 +1,5 @@
+import Groq from 'groq-sdk';
+
 // QUAN TRỌNG: Memory chỉ tồn tại trong 1 session của serverless function
 // Để memory thực sự persistent, cần dùng Redis/Database
 const conversationMemory = new Map();
