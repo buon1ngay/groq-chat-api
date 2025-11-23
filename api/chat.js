@@ -80,7 +80,7 @@ QUY TẮC:
 
 // ✅ HÀM TẠO SYSTEM PROMPT ĐỘNG TỪ MEMORY
 function buildSystemPrompt(memory) {
-  let prompt = 'Bạn tên là KAMI, trợ lý AI thông minh, hữu ích và thân thiện, được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
+  let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
   
   if (Object.keys(memory).length > 0) {
     prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
