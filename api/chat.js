@@ -56,7 +56,7 @@ QUY TẮC:
           content: extractionPrompt
         }
       ],
-      model: 'llama-3.1-70b-versatile',
+      model: 'llama-3.3-70b-versatile',
       temperature: 0.3,
       max_tokens: 500
     });
@@ -222,7 +222,7 @@ export default async function handler(req, res) {
         },
         ...conversationHistory
       ],
-      model: 'llama-3.1-70b-versatile',
+      model: 'llama-3.3-70b-versatile',
       temperature: 0.7,
       max_tokens: 1024,
       top_p: 0.9,
