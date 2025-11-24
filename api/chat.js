@@ -9,9 +9,9 @@ const redis = new Redis({
 
 // ✅ DANH SÁCH API KEY (xoay khi rate limit)
 const API_KEYS = [
-  process.env.GROQ_API_KEY_1,
-  process.env.GROQ_API_KEY_2,
-  process.env.GROQ_API_KEY_3
+  process.env.GROQ_API_KEY,
+  process.env.GROQ_API_KEY2,
+  process.env.GROQ_API_KEY3
 ];
 let currentKeyIndex = 0;
 
