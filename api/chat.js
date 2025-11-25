@@ -1,14 +1,53 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
-// ✅ Khởi tạo Redis client (persistent storage)
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// ✅ HÀM PHÂN TÍCH VÀ TRÍCH XUẤT THÔNG TIN QUAN TRỌNG
-async function extractMemory(groq, message, currentMemory) {
+// 🔑 4 API KEYS
+const API_KEYS = [
+  process.env.GROQ_API_KEY_1,
+  process.env.GROQ_API_KEY_2,
+  process.env.GROQ_API_KEY_3,
+  process.env.GROQ_API_KEY_4,
+].filter(Boolean);
+
+if (API_KEYS.length === 0) {
+  throw new Error('❌ Không tìm thấy GROQ_API_KEY!');
+}
+
+console.log(`🔑 Đã load ${API_KEYS.length} API keys`);
+
+function createGroqClient() {
+  const randomKey = API_KEYS[Math.floor(Math.random() * API_KEYS.length)];
+  return new Groq({ apiKey: randomKey });
+}
+
+async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
+  let lastError;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const groq = createGroqClient();
+      return await groq.chat.completions.create(config);
+    } catch (error) {
+      lastError = error;
+      
+      if (error.status === 429 || error.message?.includes('rate_limit')) {
+        console.warn(`⚠️ Rate limit, thử key khác (${attempt + 1}/${maxRetries})`);
+        continue;
+      }
+      
+      throw error;
+    }
+  }
+  
+  throw new Error(`Hết ${maxRetries} keys: ${lastError.message}`);
+}
+
+async function extractMemory(message, currentMemory) {
   try {
     const extractionPrompt = `Phân tích tin nhắn sau và trích xuất THÔNG TIN CÁ NHÂN QUAN TRỌNG cần lưu lâu dài.
 
@@ -45,7 +84,7 @@ QUY TẮC:
 - Nếu tin nhắn không có thông tin mới, trả về hasNewInfo: false
 - CHỈ TRẢ VỀ JSON, KHÔNG CÓ TEXT KHÁC`;
 
-    const response = await groq.chat.completions.create({
+    const response = await callGroqWithRetry({
       messages: [
         {
           role: 'system',
@@ -63,11 +102,10 @@ QUY TẮC:
 
     const content = response.choices[0]?.message?.content || '{}';
     
-    // Loại bỏ markdown code blocks nếu có
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
-      console.log('📊 Memory extraction result:', parsed);
+      console.log('📊 Memory extraction:', parsed);
       return parsed;
     }
     
@@ -78,7 +116,6 @@ QUY TẮC:
   }
 }
 
-// ✅ HÀM TẠO SYSTEM PROMPT ĐỘNG TỪ MEMORY
 function buildSystemPrompt(memory) {
   let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
   
@@ -99,7 +136,6 @@ function buildSystemPrompt(memory) {
 }
 
 export default async function handler(req, res) {
-  // Chỉ chấp nhận POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -107,25 +143,15 @@ export default async function handler(req, res) {
   try {
     const { message, userId = 'default', conversationId = 'default' } = req.body;
 
-    // Validation
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Message is required' });
     }
 
     console.log(`📨 [${userId}] Message: ${message}`);
 
-    // Khởi tạo Groq client
-    const groq = new Groq({
-      apiKey: process.env.GROQ_API_KEY
-    });
-
-    // ✅ REDIS KEYS - MỖI USER CÓ MEMORY RIÊNG
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
 
-    console.log(`🔑 Memory key: ${memoryKey}`);
-
-    // ✅ LẤY DỮ LIỆU TỪ REDIS
     let conversationHistory = await redis.get(chatKey) || [];
     if (typeof conversationHistory === 'string') {
       conversationHistory = JSON.parse(conversationHistory);
@@ -136,11 +162,8 @@ export default async function handler(req, res) {
       userMemory = JSON.parse(userMemory);
     }
 
-    console.log(`💾 Current memory for ${userId}:`, userMemory);
+    console.log(`💾 Memory cho ${userId}:`, userMemory);
 
-    // ✅ XỬ LÝ LỆNH ĐẶC BIỆT
-
-    // Lệnh: Xem memory
     if (message.toLowerCase() === '/memory' || 
         message.toLowerCase() === 'bạn nhớ gì về tôi' ||
         message.toLowerCase() === 'bạn biết gì về tôi') {
@@ -164,7 +187,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Lệnh: Xóa toàn bộ memory
     if (message.toLowerCase() === '/forget' || 
         message.toLowerCase() === 'quên tôi đi' ||
         message.toLowerCase() === 'xóa thông tin') {
@@ -178,7 +200,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Lệnh: Xóa thông tin cụ thể
     if (message.toLowerCase().startsWith('/forget ')) {
       const keyToDelete = message.substring(8).trim();
       
@@ -200,21 +221,18 @@ export default async function handler(req, res) {
       }
     }
 
-    // ✅ THÊM TIN NHẮN USER VÀO LỊCH SỬ
     conversationHistory.push({
       role: 'user',
       content: message
     });
 
-    // Giới hạn lịch sử (giữ 50 tin nhắn gần nhất)
     if (conversationHistory.length > 50) {
       conversationHistory = conversationHistory.slice(-50);
     }
 
-    // ✅ PASS 1: TRẢ LỜI BÌNH THƯỜNG
     const systemPrompt = buildSystemPrompt(userMemory);
     
-    const chatCompletion = await groq.chat.completions.create({
+    const chatCompletion = await callGroqWithRetry({
       messages: [
         {
           role: 'system',
@@ -231,37 +249,28 @@ export default async function handler(req, res) {
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
-    // ✅ PASS 2: PHÂN TÍCH VÀ LƯU MEMORY
-    const memoryExtraction = await extractMemory(groq, message, userMemory);
+    const memoryExtraction = await extractMemory(message, userMemory);
     
     let memoryUpdated = false;
     
     if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-      // Merge thông tin mới vào memory hiện tại
       userMemory = { ...userMemory, ...memoryExtraction.updates };
-      
-      // ✅ LƯU VÀO REDIS - VĨNH VIỄN (không có expiry)
       await redis.set(memoryKey, JSON.stringify(userMemory));
-      
       memoryUpdated = true;
       
-      console.log(`💾 Saved memory for ${userId}:`, userMemory);
+      console.log(`💾 Đã lưu memory cho ${userId}:`, userMemory);
       
-      // Thêm thông báo vào phản hồi
       const memoryUpdate = memoryExtraction.summary || 'Đã cập nhật thông tin về bạn.';
       assistantMessage += `\n\n💾 _${memoryUpdate}_`;
     }
 
-    // Lưu phản hồi vào lịch sử
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
     });
 
-    // ✅ LƯU CHAT HISTORY VÀO REDIS (HẾT HẠN SAU 30 NGÀY)
     await redis.setex(chatKey, 2592000, JSON.stringify(conversationHistory));
 
-    // Trả về response
     return res.status(200).json({
       success: true,
       message: assistantMessage,
@@ -274,9 +283,16 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('❌ Error:', error);
+    
+    let errorMessage = error.message || 'Internal server error';
+    
+    if (error.message?.includes('rate_limit')) {
+      errorMessage = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau vài phút.';
+    }
+    
     return res.status(500).json({
       success: false,
-      error: error.message || 'Internal server error'
+      error: errorMessage
     });
   }
 }
