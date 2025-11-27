@@ -37,7 +37,7 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
 
       // một số sdk/response trả rate limit khác nhau
       const status = error?.status || error?.statusCode || null;
-      const message = error?.message || '';
+      const message = (error?.message || '').toString();
 
       if (status === 429 || message.toLowerCase().includes('rate_limit') || message.toLowerCase().includes('rate limit')) {
         console.warn(`⚠️ Rate limit, thử key khác (${attempt + 1}/${maxRetries})`);
@@ -241,7 +241,7 @@ QUY TẮC:
       max_tokens: 500
     });
 
-    const content = response.choices[0]?.message?.content || '{}';
+    const content = response.choices[0]?.message?.content || '';
 
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
