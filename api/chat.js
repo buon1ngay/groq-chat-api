@@ -27,24 +27,165 @@ function createGroqClient() {
 
 async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   let lastError;
-  
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const groq = createGroqClient();
       return await groq.chat.completions.create(config);
     } catch (error) {
       lastError = error;
-      
-      if (error.status === 429 || error.message?.includes('rate_limit')) {
+
+      // một số sdk/response trả rate limit khác nhau
+      const status = error?.status || error?.statusCode || null;
+      const message = error?.message || '';
+
+      if (status === 429 || message.toLowerCase().includes('rate_limit') || message.toLowerCase().includes('rate limit')) {
         console.warn(`⚠️ Rate limit, thử key khác (${attempt + 1}/${maxRetries})`);
         continue;
       }
-      
+
       throw error;
     }
   }
-  
-  throw new Error(`Hết ${maxRetries} keys: ${lastError.message}`);
+
+  throw new Error(`Hết ${maxRetries} keys: ${lastError?.message || 'unknown error'}`);
+}
+
+// ---------------------------
+// 🔍 DuckDuckGo Search + Redis Cache
+// ---------------------------
+async function searchDuckDuckGo(query, { cacheTtl = 43200, maxChars = 1200 } = {}) {
+  try {
+    const cleanKey = `duck:${encodeURIComponent(query.trim().toLowerCase())}`;
+    const cached = await redis.get(cleanKey);
+    if (cached) {
+      console.log('🟢 DuckDuckGo (cache hit)');
+      return cached;
+    }
+
+    console.log('🟡 DuckDuckGo (fetching):', query);
+
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`;
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      console.warn('⚠️ DuckDuckGo response not OK', resp.status);
+      return null;
+    }
+
+    const data = await resp.json();
+
+    let result = '';
+
+    if (data.Abstract && data.Abstract.trim().length > 0) {
+      result = data.Abstract.trim();
+    } else if (data.RelatedTopics && data.RelatedTopics.length > 0) {
+      // tìm text trong RelatedTopics flatten
+      const findText = (rt) => {
+        if (!rt) return null;
+        if (rt.Text) return rt.Text;
+        if (rt.Topics && rt.Topics.length > 0) return findText(rt.Topics[0]);
+        return null;
+      };
+      for (const topic of data.RelatedTopics) {
+        const text = findText(topic);
+        if (text) {
+          result = text;
+          break;
+        }
+      }
+    } else if (data.AbstractText && data.AbstractText.trim().length > 0) {
+      result = data.AbstractText.trim();
+    }
+
+    if (!result || result.length === 0) {
+      result = 'Không tìm thấy dữ liệu liên quan từ DuckDuckGo.';
+    }
+
+    // cắt để không làm prompt quá dài
+    if (result.length > maxChars) {
+      result = result.slice(0, maxChars).trim() + '...';
+    }
+
+    // Cache (setex)
+    try {
+      await redis.setex(cleanKey, cacheTtl, result);
+    } catch (e) {
+      console.warn('⚠️ Không thể set cache DuckDuckGo:', e?.message || e);
+    }
+
+    return result;
+  } catch (err) {
+    console.error('❌ DuckDuckGo fetch error:', err);
+    return null;
+  }
+}
+
+// ---------------------------
+// 🔎 Intent detection (dùng model nhẹ để tiết kiệm quota)
+// ---------------------------
+async function detectSearchIntent(message) {
+  try {
+    const prompt = `
+Phân tích ngắn gọn câu sau để xác định xem người dùng có muốn "tìm kiếm thông tin bên ngoài (web)" hay không.
+Trả về JSON duy nhất với cấu trúc:
+{"search": true/false, "query": "câu cần tìm (nếu có)", "reason": "giải thích ngắn"}
+
+TIÊU CHÍ:
+- Yêu cầu dữ liệu cập nhật, sự kiện, giá cả, thời gian thực, hay thông tin mà mô hình có thể không biết.
+- Không phải trò chuyện, tâm sự, hỏi ý kiến thuần túy.
+
+CÂU:
+"${message}"
+`.trim();
+
+    // gọi model nhẹ để detect (dùng callGroqWithRetry để rotate keys)
+    const result = await callGroqWithRetry({
+      model: 'llama-3.1-8b-instant',
+      temperature: 0.0,
+      max_tokens: 120,
+      messages: [
+        { role: 'system', content: 'Bạn là bộ phân tích intent. Chỉ trả về JSON.' },
+        { role: 'user', content: prompt }
+      ]
+    }, /*maxRetries=*/ API_KEYS.length);
+
+    const content = result?.choices?.[0]?.message?.content || '';
+    // lấy JSON trong content
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        // bảo đảm cấu trúc
+        return {
+          search: Boolean(parsed.search),
+          query: (parsed.query || '').toString().trim(),
+          reason: parsed.reason || ''
+        };
+      } catch (e) {
+        console.warn('⚠️ Intent JSON parse fail:', e);
+      }
+    }
+
+    // fallback nhẹ: keyword method (nếu AI fail)
+    const lower = message.toLowerCase();
+    const searchKeywords = ['tìm', 'search', 'tra', 'hỏi web', 'web:', 'google', 'duck', 'wiki', 'wikipedia', 'giá', 'bao nhiêu', 'ngày', 'năm', 'thời tiết', 'tin tức'];
+    const need = searchKeywords.some(k => lower.includes(k));
+    if (need) {
+      // tách query cơ bản
+      const q = message.replace(/tìm|search|tra|hỏi web|web:|google|duck|wiki|wikipedia/gi, '').trim();
+      return { search: true, query: q || message, reason: 'fallback keyword match' };
+    }
+
+    return { search: false, query: '', reason: 'no intent detected' };
+  } catch (err) {
+    console.error('❌ Intent detect error:', err);
+    // fallback safe
+    const lower = (message || '').toLowerCase();
+    const searchKeywords = ['tìm', 'search', 'tra', 'hỏi web', 'web:', 'google', 'duck', 'wiki', 'wikipedia', 'giá', 'bao nhiêu', 'ngày', 'năm', 'thời tiết', 'tin tức'];
+    const need = searchKeywords.some(k => lower.includes(k));
+    if (need) return { search: true, query: message, reason: 'fallback on error' };
+    return { search: false, query: '', reason: 'error fallback' };
+  }
 }
 
 async function extractMemory(message, currentMemory) {
@@ -101,14 +242,14 @@ QUY TẮC:
     });
 
     const content = response.choices[0]?.message?.content || '{}';
-    
+
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
       console.log('📊 Memory extraction:', parsed);
       return parsed;
     }
-    
+
     return { hasNewInfo: false };
   } catch (error) {
     console.error('❌ Error extracting memory:', error);
@@ -118,20 +259,20 @@ QUY TẮC:
 
 function buildSystemPrompt(memory) {
   let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
-  
+
   if (Object.keys(memory).length > 0) {
     prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
-    
+
     for (const [key, value] of Object.entries(memory)) {
       prompt += `- ${key}: ${value}\n`;
     }
-    
+
     prompt += '\n⚠️ QUY TẮC:\n';
     prompt += '- Sử dụng các thông tin này một cách TỰ NHIÊN trong cuộc trò chuyện\n';
     prompt += '- ĐỪNG nhắc đi nhắc lại thông tin trừ khi được hỏi\n';
     prompt += '- Thể hiện bạn NHỚ người dùng qua cách xưng hô, cách nói chuyện phù hợp\n';
   }
-  
+
   return prompt;
 }
 
@@ -154,31 +295,40 @@ export default async function handler(req, res) {
 
     let conversationHistory = await redis.get(chatKey) || [];
     if (typeof conversationHistory === 'string') {
-      conversationHistory = JSON.parse(conversationHistory);
+      try {
+        conversationHistory = JSON.parse(conversationHistory);
+      } catch (e) {
+        conversationHistory = [];
+      }
     }
 
     let userMemory = await redis.get(memoryKey) || {};
     if (typeof userMemory === 'string') {
-      userMemory = JSON.parse(userMemory);
+      try {
+        userMemory = JSON.parse(userMemory);
+      } catch (e) {
+        userMemory = {};
+      }
     }
 
     console.log(`💾 Memory cho ${userId}:`, userMemory);
 
-    if (message.toLowerCase() === '/memory' || 
-        message.toLowerCase() === 'bạn nhớ gì về tôi' ||
-        message.toLowerCase() === 'bạn biết gì về tôi') {
-      
-      let memoryText = '📝 **Thông tin tôi nhớ về bạn:**\n\n';
-      
+    const lowerMsg = message.toLowerCase().trim();
+
+    // Các lệnh đặc biệt
+    if (lowerMsg === '/memory' || lowerMsg === 'bạn nhớ gì về tôi' || lowerMsg === 'bạn biết gì về tôi') {
+
+      let memoryText = '📝 Thông tin tôi nhớ về bạn:\n\n';
+
       if (Object.keys(userMemory).length === 0) {
         memoryText = '💭 Tôi chưa có thông tin nào về bạn. Hãy chia sẻ với tôi nhé!';
       } else {
         for (const [key, value] of Object.entries(userMemory)) {
-          memoryText += `• **${key}:** ${value}\n`;
+          memoryText += `• ${key}: ${value}\n`;
         }
-        memoryText += `\n_Tổng cộng ${Object.keys(userMemory).length} thông tin đã lưu._`;
+        memoryText += `\nTổng cộng ${Object.keys(userMemory).length} thông tin đã lưu.`;
       }
-      
+
       return res.status(200).json({
         success: true,
         message: memoryText,
@@ -187,12 +337,10 @@ export default async function handler(req, res) {
       });
     }
 
-    if (message.toLowerCase() === '/forget' || 
-        message.toLowerCase() === 'quên tôi đi' ||
-        message.toLowerCase() === 'xóa thông tin') {
-      
+    if (lowerMsg === '/forget' || lowerMsg === 'quên tôi đi' || lowerMsg === 'xóa thông tin') {
+
       await redis.del(memoryKey);
-      
+
       return res.status(200).json({
         success: true,
         message: '🗑️ Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu lại từ đầu nhé!',
@@ -200,38 +348,75 @@ export default async function handler(req, res) {
       });
     }
 
-    if (message.toLowerCase().startsWith('/forget ')) {
+    if (lowerMsg.startsWith('/forget ')) {
       const keyToDelete = message.substring(8).trim();
-      
+
       if (userMemory[keyToDelete]) {
         delete userMemory[keyToDelete];
         await redis.set(memoryKey, JSON.stringify(userMemory));
-        
+
         return res.status(200).json({
           success: true,
-          message: `🗑️ Đã xóa thông tin: **${keyToDelete}**`,
+          message: `🗑️ Đã xóa thông tin: ${keyToDelete}`,
           userId: userId
         });
       } else {
         return res.status(200).json({
           success: true,
-          message: `❓ Không tìm thấy thông tin: **${keyToDelete}**\n\nGõ /memory để xem danh sách.`,
+          message: `❓ Không tìm thấy thông tin: ${keyToDelete}\n\nGõ /memory để xem danh sách.`,
           userId: userId
         });
       }
     }
 
-    conversationHistory.push({
-      role: 'user',
-      content: message
-    });
+    // === 1) Phân tích intent (AI) để quyết định có cần search hay không
+    const intent = await detectSearchIntent(message);
+    let webInfo = null;
 
+    if (intent.search && intent.query) {
+      // check cache trước (searchDuckDuckGo cũng check nhưng double-check key hợp lý)
+      const cacheKey = `duck:${encodeURIComponent(intent.query.trim().toLowerCase())}`;
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        console.log('⚡ Cache hit DuckDuckGo (intent):', intent.query);
+        webInfo = cached;
+      } else {
+        console.log('🌐 Đang gọi DuckDuckGo theo intent:', intent.query);
+        webInfo = await searchDuckDuckGo(intent.query, { cacheTtl: 43200, maxChars: 800 });
+        if (webInfo) {
+          try {
+            await redis.setex(cacheKey, 43200, webInfo);
+          } catch (e) {
+            console.warn('⚠️ Không thể set cache (intent):', e?.message || e);
+          }
+        }
+      }
+    }
+
+    //  Nếu có webInfo, thêm như message system phụ trước khi gọi Groq
+    if (webInfo) {
+      // đẩy DỮ LIỆU WEB vào conversationHistory như 1 system message
+      conversationHistory.push({
+        role: 'system',
+        content: `DỮ LIỆU TÌM KIẾM (DuckDuckGo):\n${webInfo}\n\nHãy sử dụng dữ liệu này để trả lời chính xác; nếu mâu thuẫn, hãy ghi rõ nguồn là DuckDuckGo.`
+      });
+    }
+
+    // Thêm user message vào history (nếu chưa thêm)
+    // (Ở trên có thể đã push, nhưng đảm bảo user message có trong history)
+    const last = conversationHistory[conversationHistory.length - 1];
+    if (!last || last.role !== 'user' || last.content !== message) {
+      conversationHistory.push({ role: 'user', content: message });
+    }
+
+    // giới hạn độ dài history
     if (conversationHistory.length > 50) {
       conversationHistory = conversationHistory.slice(-50);
     }
 
     const systemPrompt = buildSystemPrompt(userMemory);
-    
+
+    // Gọi Groq chính để trả lời
     const chatCompletion = await callGroqWithRetry({
       messages: [
         {
@@ -249,27 +434,37 @@ export default async function handler(req, res) {
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
+    // === 2) Extract memory từ message (giữ nguyên logic)
     const memoryExtraction = await extractMemory(message, userMemory);
-    
+
     let memoryUpdated = false;
-    
+
     if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
       userMemory = { ...userMemory, ...memoryExtraction.updates };
-      await redis.set(memoryKey, JSON.stringify(userMemory));
-      memoryUpdated = true;
-      
-      console.log(`💾 Đã lưu memory cho ${userId}:`, userMemory);
-      
+      try {
+        await redis.set(memoryKey, JSON.stringify(userMemory));
+        memoryUpdated = true;
+        console.log(`💾 Đã lưu memory cho ${userId}:`, userMemory);
+      } catch (e) {
+        console.warn('⚠️ Không thể lưu memory lên Redis:', e?.message || e);
+      }
+
       const memoryUpdate = memoryExtraction.summary || 'Đã cập nhật thông tin về bạn.';
       assistantMessage += `\n\n💾 _${memoryUpdate}_`;
     }
 
+    // push assistant vào history
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
     });
 
-    await redis.setex(chatKey, 2592000, JSON.stringify(conversationHistory));
+    // lưu conversation history 30 ngày (2592000s)
+    try {
+      await redis.setex(chatKey, 2592000, JSON.stringify(conversationHistory));
+    } catch (e) {
+      console.warn('⚠️ Không thể lưu conversation history:', e?.message || e);
+    }
 
     return res.status(200).json({
       success: true,
@@ -283,13 +478,13 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('❌ Error:', error);
-    
+
     let errorMessage = error.message || 'Internal server error';
-    
-    if (error.message?.includes('rate_limit')) {
+
+    if ((error.message || '').toLowerCase().includes('rate_limit') || (error.message || '').toLowerCase().includes('rate limit')) {
       errorMessage = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau vài phút.';
     }
-    
+
     return res.status(500).json({
       success: false,
       error: errorMessage
