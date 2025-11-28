@@ -6,7 +6,6 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// 🔑 4 API KEYS
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
@@ -47,50 +46,71 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   throw new Error(`Hết ${maxRetries} keys: ${lastError.message}`);
 }
 
-// 🔍 WEB SEARCH FUNCTION
+// 🔍 WEB SEARCH FUNCTION - CẢI TIẾN
 async function searchWeb(query) {
   try {
     console.log('🔍 Searching web for:', query);
     
-    // Dùng DuckDuckGo Instant Answer API (FREE, không cần API key)
-    const response = await fetch(
-      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`
+    // Thử nhiều nguồn song song
+    const searchPromises = [];
+    
+    // 1. DuckDuckGo
+    searchPromises.push(
+      fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`)
+        .then(res => res.json())
+        .catch(() => null)
     );
     
-    const data = await response.json();
+    // 2. Wikipedia (tiếng Việt)
+    searchPromises.push(
+      fetch(`https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`)
+        .then(res => res.ok ? res.json() : null)
+        .catch(() => null)
+    );
+    
+    // 3. Wikipedia (tiếng Anh)
+    searchPromises.push(
+      fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`)
+        .then(res => res.ok ? res.json() : null)
+        .catch(() => null)
+    );
+    
+    const [ddgData, wikiViData, wikiEnData] = await Promise.all(searchPromises);
     
     let searchResults = '';
     
-    // Abstract (câu trả lời trực tiếp)
-    if (data.Abstract) {
-      searchResults += `📌 ${data.Abstract}\n`;
-    }
-    
-    // Related Topics
-    if (data.RelatedTopics && data.RelatedTopics.length > 0) {
-      searchResults += '\n🔗 Thông tin liên quan:\n';
-      data.RelatedTopics.slice(0, 3).forEach((topic, i) => {
-        if (topic.Text) {
-          searchResults += `${i + 1}. ${topic.Text}\n`;
-        }
-      });
-    }
-    
-    // Nếu không có kết quả từ DuckDuckGo, thử Wikipedia
-    if (!searchResults.trim()) {
-      const wikiResponse = await fetch(
-        `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`
-      );
+    // Xử lý DuckDuckGo
+    if (ddgData) {
+      if (ddgData.Abstract) {
+        searchResults += `📌 ${ddgData.Abstract}\n\n`;
+      }
       
-      if (wikiResponse.ok) {
-        const wikiData = await wikiResponse.json();
-        if (wikiData.extract) {
-          searchResults = `📚 Wikipedia: ${wikiData.extract}`;
-        }
+      if (ddgData.RelatedTopics && ddgData.RelatedTopics.length > 0) {
+        searchResults += '🔗 Thông tin liên quan:\n';
+        ddgData.RelatedTopics.slice(0, 3).forEach((topic, i) => {
+          if (topic.Text) {
+            searchResults += `${i + 1}. ${topic.Text}\n`;
+          }
+        });
+        searchResults += '\n';
       }
     }
     
-    return searchResults || '❌ Không tìm thấy thông tin.';
+    // Xử lý Wikipedia Tiếng Việt
+    if (wikiViData && wikiViData.extract) {
+      searchResults += `📚 Wikipedia (VI): ${wikiViData.extract}\n\n`;
+    }
+    
+    // Xử lý Wikipedia Tiếng Anh (nếu chưa có kết quả)
+    if (!searchResults.trim() && wikiEnData && wikiEnData.extract) {
+      searchResults += `📚 Wikipedia (EN): ${wikiEnData.extract}\n\n`;
+    }
+    
+    if (!searchResults.trim()) {
+      return '❌ Không tìm thấy thông tin từ web. Tôi sẽ dựa vào kiến thức của mình.';
+    }
+    
+    return searchResults.trim();
     
   } catch (error) {
     console.error('❌ Search error:', error);
@@ -98,35 +118,72 @@ async function searchWeb(query) {
   }
 }
 
-// 🤖 PHÁT HIỆN CẦN SEARCH HAY KHÔNG
-function needsWebSearch(message) {
-  const searchTriggers = [
-    // Thời gian hiện tại
-    /hiện (tại|nay|giờ)|bây giờ|lúc này|ngày nay|năm \d{4}|tháng \d+/i,
-    
-    // Số liệu, thống kê
-    /bao nhiêu|mấy|số lượng|tổng số|có \d+/i,
-    
-    // Sự kiện gần đây
-    /mới nhất|gần đây|vừa rồi|hôm nay|hôm qua|tuần này|tháng này/i,
-    
-    // Giá cả, tỷ giá
-    /giá|bao nhiêu tiền|tỷ giá|đắt|rẻ/i,
-    
-    // Tin tức
-    /tin tức|sự kiện|diễn biến|thay đổi|cập nhật/i,
-    
-    // Địa lý, hành chính
-    /tỉnh|thành phố|quốc gia|đất nước|sáp nhập|chia tách/i,
-    
-    // Người nổi tiếng (status hiện tại)
-    /còn sống|đã chết|hiện tại làm gì|bây giờ ở đâu/i,
-    
-    // Công nghệ mới
-    /phiên bản mới|ra mắt|công bố|tính năng mới/i
+// 🤖 PHÁT HIỆN CẦN SEARCH - CẢI TIẾN
+async function needsWebSearch(message) {
+  // Kiểm tra nhanh bằng regex trước
+  const quickSearchTriggers = [
+    /hiện (tại|nay|giờ)|bây giờ|lúc này|ngày nay/i,
+    /năm (19|20)\d{2}|tháng \d+\/\d+/i,
+    /bao nhiêu|mấy|số lượng|tổng số/i,
+    /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần này|tháng này/i,
+    /giá cả|bao nhiêu tiền|tỷ giá|đắt|rẻ/i,
+    /tin tức|sự kiện|diễn biến|cập nhật/i,
+    /ai là|who is|là ai/i,
+    /khi nào|when|bao giờ/i,
+    /ở đâu|where|tại đâu/i,
   ];
   
-  return searchTriggers.some(pattern => pattern.test(message));
+  // Nếu match quick trigger, return true ngay
+  if (quickSearchTriggers.some(pattern => pattern.test(message))) {
+    console.log('✅ Quick trigger matched!');
+    return true;
+  }
+  
+  // Sử dụng AI để phán đoán thông minh hơn
+  try {
+    const response = await callGroqWithRetry({
+      messages: [
+        {
+          role: 'system',
+          content: `Bạn là trợ lý phân tích. Xác định xem câu hỏi có CẦN TÌM KIẾM WEB không.
+
+CẦN TÌM KIẾM nếu:
+- Hỏi về sự kiện hiện tại, tin tức mới
+- Hỏi về người nổi tiếng (ai là, làm gì)
+- Hỏi về số liệu, giá cả, tỷ giá
+- Hỏi về thời gian, ngày tháng cụ thể
+- Hỏi về địa điểm, quốc gia, thành phố
+- Hỏi về công nghệ mới, sản phẩm mới
+
+KHÔNG CẦN TÌM KIẾM nếu:
+- Hỏi về kiến thức chung, khái niệm
+- Yêu cầu giải thích, hướng dẫn
+- Trò chuyện thông thường
+- Hỏi về bản thân người dùng
+
+CHỈ TRẢ VỀ "YES" hoặc "NO", không giải thích.`
+        },
+        {
+          role: 'user',
+          content: `Câu hỏi: "${message}"\n\nCần tìm kiếm web không?`
+        }
+      ],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.1,
+      max_tokens: 10
+    });
+
+    const answer = response.choices[0]?.message?.content?.trim().toUpperCase();
+    const needsSearch = answer === 'YES';
+    
+    console.log(`🤖 AI decision: ${answer} -> ${needsSearch ? 'SEARCH' : 'NO SEARCH'}`);
+    
+    return needsSearch;
+  } catch (error) {
+    console.error('❌ AI detection error:', error);
+    // Fallback: nếu có từ khóa câu hỏi, search
+    return /\?|ai |gì |nào |đâu |sao |như thế nào/i.test(message);
+  }
 }
 
 async function extractMemory(message, currentMemory) {
@@ -201,7 +258,6 @@ QUY TẮC:
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
   
-  // ✅ THÊM KẾT QUẢ SEARCH VÀO SYSTEM PROMPT
   if (searchResults) {
     prompt += '\n\n🌐 THÔNG TIN MỚI NHẤT TỪ WEB:\n';
     prompt += searchResults;
@@ -311,6 +367,19 @@ export default async function handler(req, res) {
       }
     }
 
+    // ✅ THÊM LỆNH DEBUG SEARCH
+    if (message.toLowerCase() === '/search test') {
+      const testQuery = 'Elon Musk';
+      console.log('🧪 Testing search with:', testQuery);
+      const testResults = await searchWeb(testQuery);
+      
+      return res.status(200).json({
+        success: true,
+        message: `🧪 **Test Search Results:**\n\n${testResults || 'No results'}`,
+        userId: userId
+      });
+    }
+
     conversationHistory.push({
       role: 'user',
       content: message
@@ -324,13 +393,18 @@ export default async function handler(req, res) {
     let searchResults = null;
     let usedSearch = false;
     
-    if (needsWebSearch(message)) {
+    const shouldSearch = await needsWebSearch(message);
+    console.log(`🔍 Should search: ${shouldSearch}`);
+    
+    if (shouldSearch) {
       console.log('🔍 Triggering web search...');
       searchResults = await searchWeb(message);
       usedSearch = true;
       
       if (searchResults) {
         console.log('✅ Search results:', searchResults.substring(0, 200) + '...');
+      } else {
+        console.log('⚠️ Search returned no results');
       }
     }
 
@@ -353,7 +427,6 @@ export default async function handler(req, res) {
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
-    // Thêm indicator nếu dùng web search
     if (usedSearch && searchResults) {
       assistantMessage += '\n\n🌐 _Thông tin được cập nhật từ web_';
     }
@@ -388,7 +461,8 @@ export default async function handler(req, res) {
       historyLength: conversationHistory.length,
       memoryUpdated: memoryUpdated,
       memoryCount: Object.keys(userMemory).length,
-      usedWebSearch: usedSearch
+      usedWebSearch: usedSearch,
+      searchTriggered: shouldSearch
     });
 
   } catch (error) {
