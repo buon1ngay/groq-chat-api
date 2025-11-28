@@ -1,3 +1,4 @@
+import fetch from 'node-fetch';
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
