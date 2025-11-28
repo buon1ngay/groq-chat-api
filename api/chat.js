@@ -258,7 +258,7 @@ function buildSystemPrompt(memory, searchResults = null) {
   if (searchResults) {
     prompt += '\n\n🌐 THÔNG TIN MỚI NHẤT TỪ WEB:\n';
     prompt += searchResults;
-    prompt += '\n\n⚠️ HÃY SỬ DỤNG thông tin web phía trên để trả lời CHÍNH XÁC nhất. Ưu tiên thông tin web hơn kiến thức cũ của bạn.\n';
+    prompt += '\n\n⚠️ Hãy sử dụng thông tin này khi câu trả lời cần dữ liệu thực tế.\n';
   }
   
   if (Object.keys(memory).length > 0) {
