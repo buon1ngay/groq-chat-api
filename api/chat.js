@@ -45,73 +45,70 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   
   throw new Error(`Hết ${maxRetries} keys: ${lastError.message}`);
 }
-
-// 🔍 WEB SEARCH FUNCTION - CẢI TIẾN
+// 🔍 WEB SEARCH FUNCTION - CHỈ DÙNG SERPER API
 async function searchWeb(query) {
   try {
     console.log('🔍 Searching web for:', query);
-    
-    // Thử nhiều nguồn song song
-    const searchPromises = [];
-    
-    // 1. DuckDuckGo
-    searchPromises.push(
-      fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`)
-        .then(res => res.json())
-        .catch(() => null)
-    );
-    
-    // 2. Wikipedia (tiếng Việt)
-    searchPromises.push(
-      fetch(`https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`)
-        .then(res => res.ok ? res.json() : null)
-        .catch(() => null)
-    );
-    
-    // 3. Wikipedia (tiếng Anh)
-    searchPromises.push(
-      fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`)
-        .then(res => res.ok ? res.json() : null)
-        .catch(() => null)
-    );
-    
-    const [ddgData, wikiViData, wikiEnData] = await Promise.all(searchPromises);
-    
-    let searchResults = '';
-    
-    // Xử lý DuckDuckGo
-    if (ddgData) {
-      if (ddgData.Abstract) {
-        searchResults += `📌 ${ddgData.Abstract}\n\n`;
-      }
-      
-      if (ddgData.RelatedTopics && ddgData.RelatedTopics.length > 0) {
-        searchResults += '🔗 Thông tin liên quan:\n';
-        ddgData.RelatedTopics.slice(0, 3).forEach((topic, i) => {
-          if (topic.Text) {
-            searchResults += `${i + 1}. ${topic.Text}\n`;
-          }
+
+    if (!process.env.SERPER_API_KEY) {
+      console.error('❌ Thiếu SERPER_API_KEY');
+      return null;
+    }
+
+    // Gửi request tới Serper.dev
+    const response = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': process.env.SERPER_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        q: query,
+        gl: 'vn',    // Việt Nam
+        hl: 'vi',    // Ngôn ngữ tiếng Việt
+        num: 5       // Lấy 5 kết quả
+      })
+    });
+
+    if (!response.ok) {
+      console.error('❌ Serper API lỗi:', await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+    let results = '';
+
+    // 🎯 Knowledge Graph
+    if (data.knowledgeGraph) {
+      const kg = data.knowledgeGraph;
+      results += `📌 ${kg.title || ''}\n`;
+      if (kg.description) results += `${kg.description}\n`;
+      if (kg.attributes) {
+        Object.entries(kg.attributes).slice(0, 3).forEach(([k, v]) => {
+          results += `• ${k}: ${v}\n`;
         });
-        searchResults += '\n';
       }
+      results += '\n';
     }
-    
-    // Xử lý Wikipedia Tiếng Việt
-    if (wikiViData && wikiViData.extract) {
-      searchResults += `📚 Wikipedia (VI): ${wikiViData.extract}\n\n`;
+
+    // 🎯 Answer Box (nếu có)
+    if (data.answerBox) {
+      const ab = data.answerBox;
+      if (ab.answer) results += `✅ ${ab.answer}\n\n`;
+      if (ab.snippet) results += `${ab.snippet}\n\n`;
     }
-    
-    // Xử lý Wikipedia Tiếng Anh (nếu chưa có kết quả)
-    if (!searchResults.trim() && wikiEnData && wikiEnData.extract) {
-      searchResults += `📚 Wikipedia (EN): ${wikiEnData.extract}\n\n`;
+
+    // 🎯 Organic results (Google Search)
+    if (data.organic && data.organic.length > 0) {
+      results += '🔗 Kết quả tìm kiếm:\n';
+      data.organic.slice(0, 3).forEach((item, i) => {
+        results += `${i + 1}. ${item.title}\n`;
+        if (item.snippet) results += `   ${item.snippet}\n`;
+      });
     }
-    
-    if (!searchResults.trim()) {
-      return '❌ Không tìm thấy thông tin từ web. Tôi sẽ dựa vào kiến thức của mình.';
-    }
-    
-    return searchResults.trim();
-    
+
+    return results.trim() || null;
+
   } catch (error) {
     console.error('❌ Search error:', error);
     return null;
