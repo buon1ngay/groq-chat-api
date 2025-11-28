@@ -6,7 +6,7 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// 🔑 4 API KEYS
+// 🔑 4 GROQ API KEYS
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
@@ -18,7 +18,7 @@ if (API_KEYS.length === 0) {
   throw new Error('❌ Không tìm thấy GROQ_API_KEY!');
 }
 
-console.log(`🔑 Đã load ${API_KEYS.length} API keys`);
+console.log(`🔑 Đã load ${API_KEYS.length} Groq API keys`);
 
 function createGroqClient() {
   const randomKey = API_KEYS[Math.floor(Math.random() * API_KEYS.length)];
@@ -47,48 +47,156 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   throw new Error(`Hết ${maxRetries} keys: ${lastError.message}`);
 }
 
+// 🔍 KIỂM TRA CẦN TÌM KIẾM KHÔNG
+function needsWebSearch(message) {
+  const lower = message.toLowerCase();
+  
+  const searchKeywords = [
+    // Tin tức & sự kiện
+    'tin tức', 'tin mới', 'vụ', 'sự kiện', 'xảy ra',
+    'hôm qua', 'hôm nay', 'tuần này', 'gần đây', 'mới nhất',
+    
+    // Câu hỏi về hiện tại
+    'ai là', 'đang', 'hiện tại', 'bây giờ', 'thế nào rồi',
+    
+    // Từ khóa cụ thể
+    'bé', 'trẻ em', 'tai nạn', 'vụ việc', 'case',
+    'breaking', 'news', 'latest', 'recent', 'update'
+  ];
+  
+  return searchKeywords.some(keyword => lower.includes(keyword));
+}
+
+// 🔍 TÌM KIẾM VỚI DUCKDUCKGO (MIỄN PHÍ, UNLIMITED!)
+async function searchDuckDuckGo(query) {
+  try {
+    console.log('🟢 Searching DuckDuckGo for:', query);
+    
+    // DuckDuckGo Instant Answer API - Hoàn toàn miễn phí!
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&no_redirect=1`;
+    
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; KamiBot/1.0)'
+      }
+    });
+    
+    if (!response.ok) {
+      console.warn('⚠️ DuckDuckGo error:', response.status);
+      return null;
+    }
+    
+    const data = await response.json();
+    
+    let result = '';
+    
+    // 1. Abstract (instant answer - thường là tốt nhất)
+    if (data.Abstract && data.Abstract.length > 30) {
+      result = data.Abstract;
+      console.log('✅ Found Abstract');
+    }
+    // 2. Answer (direct answer)
+    else if (data.Answer) {
+      result = data.Answer;
+      console.log('✅ Found Answer');
+    }
+    // 3. Related Topics
+    else if (data.RelatedTopics && data.RelatedTopics.length > 0) {
+      const topics = data.RelatedTopics
+        .filter(t => t.Text) // Chỉ lấy topics có text
+        .slice(0, 3) // Lấy 3 kết quả đầu
+        .map(t => t.Text)
+        .join('\n\n');
+      
+      if (topics) {
+        result = topics;
+        console.log('✅ Found Related Topics');
+      }
+    }
+    
+    if (result && result.length > 30) {
+      console.log('✅ DuckDuckGo search successful');
+      return `[Nguồn: DuckDuckGo]\n${result}`;
+    }
+    
+    console.log('⚠️ DuckDuckGo returned no useful results');
+    return null;
+    
+  } catch (error) {
+    console.error('❌ DuckDuckGo search failed:', error.message);
+    return null;
+  }
+}
+
+// 🔍 HÀM TÌM KIẾM CHÍNH
+async function searchWeb(query) {
+  console.log('🔍 Starting web search');
+  
+  // Hiện tại chỉ dùng DuckDuckGo (miễn phí, unlimited)
+  const result = await searchDuckDuckGo(query);
+  
+  if (result) {
+    return result;
+  }
+  
+  console.log('❌ No search results available');
+  return null;
+}
+
 async function extractMemory(message, currentMemory) {
   try {
     const extractionPrompt = `Phân tích tin nhắn sau và trích xuất THÔNG TIN CÁ NHÂN QUAN TRỌNG cần lưu lâu dài.
 
-THÔNG TIN CẦN LƯU (nếu có):
-- Tên, biệt danh, cách gọi ưa thích
-- Nghề nghiệp, công việc hiện tại
-- Sở thích, đam mê, thói quen
-- Thông tin gia đình (vợ/chồng, con cái, sinh nhật, tên...)
-- Địa điểm sống, quê quán
-- Mục tiêu, dự định trong tương lai
-- Ngôn ngữ lập trình yêu thích (nếu là developer)
-- Trình độ học vấn, trường học
-- Sức khỏe quan trọng (dị ứng, bệnh mãn tính...)
-- Bất kỳ thông tin USER YÊU CẦU BẠN NHỚ
+⚠️ QUY TẮC QUAN TRỌNG - ĐỌC KỸ:
+- CHỈ lưu khi user CHÍNH THỨC GIỚI THIỆU về bản thân
+- KHÔNG lưu các câu hỏi, tin nhắn thông thường
+- KHÔNG lưu tên người khác, tên thương hiệu, tên sản phẩm
+- KHÔNG lưu thông tin user chỉ hỏi/nhắc đến thoáng qua
+- CHỈ lưu khi user NÓI VỀ CHÍNH MÌNH với ý định muốn bot nhớ
+
+THÔNG TIN CẦN LƯU (CHỈ KHI USER CHÍNH THỨC GIỚI THIỆU):
+- Tên thật của user (VD: "Tôi tên là Hùng", "Mình là An")
+- Biệt danh USER MUỐN ĐƯỢC GỌI (VD: "Gọi tôi là Alex", "Hãy gọi mình là...")
+- Nghề nghiệp (VD: "Tôi là lập trình viên", "Mình làm giáo viên")
+- Sở thích (VD: "Tôi thích chơi game", "Mình hay đọc sách")
+- Thông tin gia đình CỦA USER (VD: "Vợ tôi tên Lan", "Con tôi 5 tuổi")
+- Địa điểm sống (VD: "Tôi sống ở Hà Nội")
+- Năm sinh, tuổi (VD: "Tôi sinh năm 1995", "Mình 25 tuổi")
+- Ngôn ngữ lập trình user dùng (VD: "Tôi code Python")
+- BẤT KỲ THÔNG TIN NÀO USER CHÍNH THỨC YÊU CẦU: "Hãy nhớ rằng..."
+
+❌ KHÔNG LƯU:
+- Câu hỏi: "Dimixa hay Xadimi?" → KHÔNG LƯU
+- Tên người khác: "Bạn tôi tên Hùng" → KHÔNG LƯU
+- Tên thương hiệu: "iPhone", "Samsung" → KHÔNG LƯU
+- Tin nhắn ngắn: "OK", "Thanks" → KHÔNG LƯU
 
 TIN NHẮN CỦA USER:
 "${message}"
 
-THÔNG TIN ĐÃ LƯU TRƯỚC ĐÓ:
+THÔNG TIN ĐÃ LƯU:
 ${JSON.stringify(currentMemory, null, 2)}
 
-HÃY TRẢ VỀ JSON VỚI CẤU TRÚC:
+HÃY TRẢ VỀ JSON:
 {
   "hasNewInfo": true/false,
   "updates": {
     "Tên key": "Giá trị mới"
   },
-  "summary": "Tóm tắt ngắn gọn đã lưu gì"
+  "summary": "Tóm tắt ngắn gọn"
 }
 
 QUY TẮC:
-- Chỉ lưu thông tin QUAN TRỌNG, KHÔNG lưu câu hỏi thông thường
-- Key phải là tiếng Việt có dấu, dễ hiểu (ví dụ: "Tên", "Nghề nghiệp", "Sở thích")
-- Nếu tin nhắn không có thông tin mới, trả về hasNewInfo: false
-- CHỈ TRẢ VỀ JSON, KHÔNG CÓ TEXT KHÁC`;
+- CHỈ lưu khi USER NÓI VỀ CHÍNH MÌNH
+- Key tiếng Việt có dấu
+- Nếu không có thông tin cá nhân CỦA USER, trả về hasNewInfo: false
+- CHỈ TRẢ VỀ JSON, KHÔNG TEXT KHÁC`;
 
     const response = await callGroqWithRetry({
       messages: [
         {
           role: 'system',
-          content: 'Bạn là trợ lý phân tích thông tin. Chỉ trả về JSON đúng format, không thêm markdown hay text khác.'
+          content: 'Bạn là trợ lý phân tích. CHỈ lưu khi user CHÍNH THỨC nói về bản thân. KHÔNG lưu câu hỏi. Chỉ trả về JSON.'
         },
         {
           role: 'user',
@@ -164,6 +272,7 @@ export default async function handler(req, res) {
 
     console.log(`💾 Memory cho ${userId}:`, userMemory);
 
+    // ✅ LỆNH: Xem memory
     if (message.toLowerCase() === '/memory' || 
         message.toLowerCase() === 'bạn nhớ gì về tôi' ||
         message.toLowerCase() === 'bạn biết gì về tôi') {
@@ -187,6 +296,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // ✅ LỆNH: Xóa toàn bộ memory
     if (message.toLowerCase() === '/forget' || 
         message.toLowerCase() === 'quên tôi đi' ||
         message.toLowerCase() === 'xóa thông tin') {
@@ -200,6 +310,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // ✅ LỆNH: Xóa thông tin cụ thể
     if (message.toLowerCase().startsWith('/forget ')) {
       const keyToDelete = message.substring(8).trim();
       
@@ -221,6 +332,41 @@ export default async function handler(req, res) {
       }
     }
 
+    // 🔍 TÌM KIẾM WEB (NẾU CẦN)
+    let searchContext = '';
+    let hasSearch = false;
+    
+    if (needsWebSearch(message)) {
+      console.log('🔍 Query needs web search');
+      
+      // Kiểm tra cache trước
+      const cacheKey = `search:${message.toLowerCase().trim().substring(0, 100)}`;
+      let cachedResult = await redis.get(cacheKey);
+      
+      if (cachedResult) {
+        console.log('✅ Using cached search result');
+        if (typeof cachedResult === 'string') {
+          searchContext = cachedResult;
+          hasSearch = true;
+        }
+      } else {
+        // Tìm kiếm mới
+        const searchResult = await searchWeb(message);
+        
+        if (searchResult) {
+          searchContext = `\n\n[THÔNG TIN TÌM KIẾM TỪ WEB]\n${searchResult}\n[KẾT THÚC THÔNG TIN TÌM KIẾM]\n\n`;
+          hasSearch = true;
+          
+          // Lưu cache 2 giờ
+          await redis.setex(cacheKey, 7200, searchContext);
+          
+          console.log('✅ Search successful, cached for 2 hours');
+        } else {
+          console.log('⚠️ No search results');
+        }
+      }
+    }
+
     conversationHistory.push({
       role: 'user',
       content: message
@@ -230,7 +376,11 @@ export default async function handler(req, res) {
       conversationHistory = conversationHistory.slice(-50);
     }
 
-    const systemPrompt = buildSystemPrompt(userMemory);
+    // Thêm search context vào system prompt
+    let systemPrompt = buildSystemPrompt(userMemory);
+    if (searchContext) {
+      systemPrompt += searchContext;
+    }
     
     const chatCompletion = await callGroqWithRetry({
       messages: [
@@ -249,6 +399,12 @@ export default async function handler(req, res) {
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
+    // Thêm icon search nếu có
+    if (hasSearch && !assistantMessage.startsWith('🔍')) {
+      assistantMessage = '🔍 ' + assistantMessage;
+    }
+
+    // Extract memory
     const memoryExtraction = await extractMemory(message, userMemory);
     
     let memoryUpdated = false;
@@ -278,7 +434,8 @@ export default async function handler(req, res) {
       conversationId: conversationId,
       historyLength: conversationHistory.length,
       memoryUpdated: memoryUpdated,
-      memoryCount: Object.keys(userMemory).length
+      memoryCount: Object.keys(userMemory).length,
+      hasSearch: hasSearch // ⬅️ Flag để biết có search không
     });
 
   } catch (error) {
