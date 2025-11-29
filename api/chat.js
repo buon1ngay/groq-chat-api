@@ -45,79 +45,173 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   
   throw new Error(`Hết ${maxRetries} keys: ${lastError.message}`);
 }
-// 🔍 WEB SEARCH FUNCTION - CHỈ DÙNG SERPER API
-async function searchWeb(query) {
-  try {
-    console.log('🔍 Searching web for:', query);
 
-    if (!process.env.SERPER_API_KEY) {
-      console.error('❌ Thiếu SERPER_API_KEY');
-      return null;
-    }
+// 🔍 DANH SÁCH SEARCH APIs - CHỈ 2 API TỐT NHẤT (KHÔNG CẦN THẺ)
+const SEARCH_APIS = [
+  // 1. Serper (Google Search) - 2,500 free/tháng, KHÔNG CẦN THẺ
+  {
+    name: 'Serper',
+    apiKey: process.env.SERPER_API_KEY,
+    enabled: !!process.env.SERPER_API_KEY,
+    async search(query) {
+      const response = await fetch('https://google.serper.dev/search', {
+        method: 'POST',
+        headers: {
+          'X-API-KEY': this.apiKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          q: query,
+          gl: 'vn',
+          hl: 'vi',
+          num: 5
+        })
+      });
 
-    // Gửi request tới Serper.dev
-    const response = await fetch('https://google.serper.dev/search', {
-      method: 'POST',
-      headers: {
-        'X-API-KEY': process.env.SERPER_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        q: query,
-        gl: 'vn',    // Việt Nam
-        hl: 'vi',    // Ngôn ngữ tiếng Việt
-        num: 5       // Lấy 5 kết quả
-      })
-    });
+      if (!response.ok) return null;
 
-    if (!response.ok) {
-      console.error('❌ Serper API lỗi:', await response.text());
-      return null;
-    }
+      const data = await response.json();
+      let results = '';
 
-    const data = await response.json();
-    let results = '';
+      // Knowledge Graph
+      if (data.knowledgeGraph) {
+        const kg = data.knowledgeGraph;
+        results += `📌 ${kg.title || ''}\n`;
+        if (kg.description) results += `${kg.description}\n`;
+        if (kg.attributes) {
+          Object.entries(kg.attributes).slice(0, 3).forEach(([k, v]) => {
+            results += `• ${k}: ${v}\n`;
+          });
+        }
+        results += '\n';
+      }
 
-    // 🎯 Knowledge Graph
-    if (data.knowledgeGraph) {
-      const kg = data.knowledgeGraph;
-      results += `📌 ${kg.title || ''}\n`;
-      if (kg.description) results += `${kg.description}\n`;
-      if (kg.attributes) {
-        Object.entries(kg.attributes).slice(0, 3).forEach(([k, v]) => {
-          results += `• ${k}: ${v}\n`;
+      // Answer Box
+      if (data.answerBox) {
+        const ab = data.answerBox;
+        if (ab.answer) results += `✅ ${ab.answer}\n\n`;
+        if (ab.snippet) results += `${ab.snippet}\n\n`;
+      }
+
+      // Organic results
+      if (data.organic && data.organic.length > 0) {
+        results += '🔗 Kết quả:\n';
+        data.organic.slice(0, 3).forEach((item, i) => {
+          results += `${i + 1}. ${item.title}\n`;
+          if (item.snippet) results += `   ${item.snippet}\n`;
         });
       }
-      results += '\n';
-    }
 
-    // 🎯 Answer Box (nếu có)
-    if (data.answerBox) {
-      const ab = data.answerBox;
-      if (ab.answer) results += `✅ ${ab.answer}\n\n`;
-      if (ab.snippet) results += `${ab.snippet}\n\n`;
+      return results.trim() || null;
     }
-
-    // 🎯 Organic results (Google Search)
-    if (data.organic && data.organic.length > 0) {
-      results += '🔗 Kết quả tìm kiếm:\n';
-      data.organic.slice(0, 3).forEach((item, i) => {
-        results += `${i + 1}. ${item.title}\n`;
-        if (item.snippet) results += `   ${item.snippet}\n`;
+  },
+  
+  // 2. Tavily (AI-optimized) - 1,000 free/tháng, KHÔNG CẦN THẺ
+  {
+    name: 'Tavily',
+    apiKey: process.env.TAVILY_API_KEY,
+    enabled: !!process.env.TAVILY_API_KEY,
+    async search(query) {
+      const response = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          api_key: this.apiKey,
+          query: query,
+          search_depth: 'basic',
+          include_answer: true,
+          max_results: 5
+        })
       });
+
+      if (!response.ok) return null;
+
+      const data = await response.json();
+      let results = '';
+
+      // AI-generated answer
+      if (data.answer) {
+        results += `✅ ${data.answer}\n\n`;
+      }
+
+      // Source results
+      if (data.results && data.results.length > 0) {
+        results += '🔗 Nguồn:\n';
+        data.results.slice(0, 3).forEach((item, i) => {
+          results += `${i + 1}. ${item.title}\n`;
+          if (item.content) results += `   ${item.content.substring(0, 150)}...\n`;
+        });
+      }
+
+      return results.trim() || null;
     }
+  },
+  
+  // 3. DuckDuckGo (Fallback - Miễn phí hoàn toàn, không cần API key)
+  {
+    name: 'DuckDuckGo',
+    apiKey: null,
+    enabled: true, // Luôn bật làm fallback
+    async search(query) {
+      const [ddgData, wikiData] = await Promise.all([
+        fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`)
+          .then(res => res.json()).catch(() => null),
+        fetch(`https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`)
+          .then(res => res.ok ? res.json() : null).catch(() => null)
+      ]);
 
-    return results.trim() || null;
+      let results = '';
 
-  } catch (error) {
-    console.error('❌ Search error:', error);
+      if (ddgData && ddgData.Abstract) {
+        results += `📌 ${ddgData.Abstract}\n\n`;
+      }
+
+      if (wikiData && wikiData.extract) {
+        results += `📚 Wikipedia: ${wikiData.extract}\n\n`;
+      }
+
+      return results.trim() || null;
+    }
+  }
+].filter(api => api.enabled);
+
+console.log(`🔍 Đã load ${SEARCH_APIS.length} Search APIs: ${SEARCH_APIS.map(a => a.name).join(', ')}`);
+
+// 🔍 TÌM KIẾM VỚI NHIỀU APIs (giống callGroqWithRetry)
+async function searchWeb(query) {
+  if (SEARCH_APIS.length === 0) {
+    console.error('❌ Không có Search API nào được cấu hình!');
     return null;
   }
+
+  console.log(`🔍 Searching with ${SEARCH_APIS.length} APIs...`);
+
+  // Thử từng API cho đến khi có kết quả
+  for (const api of SEARCH_APIS) {
+    try {
+      console.log(`   Trying ${api.name}...`);
+      const result = await api.search(query);
+      
+      if (result) {
+        console.log(`✅ ${api.name} returned results!`);
+        return result;
+      }
+      
+      console.log(`⚠️ ${api.name} returned no results, trying next...`);
+    } catch (error) {
+      console.error(`❌ ${api.name} error:`, error.message);
+      continue;
+    }
+  }
+
+  console.log('⚠️ All search APIs failed or returned no results');
+  return null;
 }
 
-// 🤖 PHÁT HIỆN CẦN SEARCH - CẢI TIẾN
+// 🤖 PHÁT HIỆN CẦN SEARCH
 async function needsWebSearch(message) {
-  // Kiểm tra nhanh bằng regex trước
   const quickSearchTriggers = [
     /hiện (tại|nay|giờ)|bây giờ|lúc này|ngày nay/i,
     /năm (19|20)\d{2}|tháng \d+\/\d+/i,
@@ -130,13 +224,11 @@ async function needsWebSearch(message) {
     /ở đâu|where|tại đâu/i,
   ];
   
-  // Nếu match quick trigger, return true ngay
   if (quickSearchTriggers.some(pattern => pattern.test(message))) {
     console.log('✅ Quick trigger matched!');
     return true;
   }
   
-  // Sử dụng AI để phán đoán thông minh hơn
   try {
     const response = await callGroqWithRetry({
       messages: [
@@ -178,7 +270,6 @@ CHỈ TRẢ VỀ "YES" hoặc "NO", không giải thích.`
     return needsSearch;
   } catch (error) {
     console.error('❌ AI detection error:', error);
-    // Fallback: nếu có từ khóa câu hỏi, search
     return /\?|ai |gì |nào |đâu |sao |như thế nào/i.test(message);
   }
 }
@@ -364,16 +455,16 @@ export default async function handler(req, res) {
       }
     }
 
-    // ✅ THÊM LỆNH DEBUG SEARCH
     if (message.toLowerCase() === '/search test') {
-      const testQuery = 'Elon Musk';
+      const testQuery = 'Donald Trump 2025';
       console.log('🧪 Testing search with:', testQuery);
       const testResults = await searchWeb(testQuery);
       
       return res.status(200).json({
         success: true,
-        message: `🧪 **Test Search Results:**\n\n${testResults || 'No results'}`,
-        userId: userId
+        message: `🧪 **Test Search Results:**\n\n${testResults || 'No results - Thêm SERPER_API_KEY hoặc TAVILY_API_KEY vào .env'}`,
+        userId: userId,
+        availableAPIs: SEARCH_APIS.map(a => a.name)
       });
     }
 
@@ -386,7 +477,6 @@ export default async function handler(req, res) {
       conversationHistory = conversationHistory.slice(-50);
     }
 
-    // ✅ KIỂM TRA XEM CÓ CẦN SEARCH WEB KHÔNG
     let searchResults = null;
     let usedSearch = false;
     
@@ -424,10 +514,6 @@ export default async function handler(req, res) {
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
-    if (usedSearch && searchResults) {
-      assistantMessage += '\n\n🌐 _Thông tin được cập nhật từ web_';
-    }
-
     const memoryExtraction = await extractMemory(message, userMemory);
     
     let memoryUpdated = false;
@@ -459,7 +545,8 @@ export default async function handler(req, res) {
       memoryUpdated: memoryUpdated,
       memoryCount: Object.keys(userMemory).length,
       usedWebSearch: usedSearch,
-      searchTriggered: shouldSearch
+      searchTriggered: shouldSearch,
+      availableSearchAPIs: SEARCH_APIS.length
     });
 
   } catch (error) {
