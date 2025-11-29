@@ -220,8 +220,8 @@ async function needsWebSearch(message) {
     /giá cả|bao nhiêu tiền|tỷ giá|đắt|rẻ/i,
     /tin tức|sự kiện|diễn biến|cập nhật/i,
     /ai là|who is|là ai/i,
-    /khi nào|when|bao giờ/i,
-    /ở đâu|where|tại đâu/i,
+    /khi nào|bao giờ/i,
+    /ở đâu|tại đâu/i,
   ];
   
   if (quickSearchTriggers.some(pattern => pattern.test(message))) {
@@ -349,7 +349,11 @@ function buildSystemPrompt(memory, searchResults = null) {
   if (searchResults) {
     prompt += '\n\n🌐 THÔNG TIN MỚI NHẤT TỪ WEB:\n';
     prompt += searchResults;
-    prompt += '\n\n⚠️ Hãy sử dụng thông tin này khi câu trả lời cần dữ liệu thực tế.\n';
+    prompt += '\n\n⚠️ QUY TẮC QUAN TRỌNG:\n';
+    prompt += '- Sử dụng thông tin web để trả lời chính xác\n';
+    prompt += '- TRẢ LỜI TRỰC TIẾP, ĐỪNG nói "tôi đã tìm kiếm", "theo thông tin", "dựa trên web"\n';
+    prompt += '- Trả lời như thể bạn BIẾT thông tin đó từ đầu\n';
+    prompt += '- KHÔNG nhắc đến việc tìm kiếm hay nguồn thông tin\n';
   }
   
   if (Object.keys(memory).length > 0) {
