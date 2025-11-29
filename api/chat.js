@@ -346,16 +346,6 @@ QUY TẮC:
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
   
-  if (searchResults) {
-    prompt += '\n\n🌐 THÔNG TIN MỚI NHẤT TỪ WEB:\n';
-    prompt += searchResults;
-    prompt += '\n\n⚠️ QUY TẮC QUAN TRỌNG:\n';
-    prompt += '- Sử dụng thông tin web để trả lời chính xác\n';
-    prompt += '- TRẢ LỜI TRỰC TIẾP, ĐỪNG nói "tôi đã tìm kiếm", "theo thông tin", "dựa trên web"\n';
-    prompt += '- Trả lời như thể bạn BIẾT thông tin đó từ đầu\n';
-    prompt += '- KHÔNG nhắc đến việc tìm kiếm hay nguồn thông tin\n';
-  }
-  
   if (Object.keys(memory).length > 0) {
     prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
     
