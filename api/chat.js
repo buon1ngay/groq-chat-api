@@ -153,7 +153,7 @@ const SEARCH_APIS = [
   {
     name: 'DuckDuckGo',
     apiKey: null,
-    enabled: true, // Luôn bật làm fallback
+    enabled: true,
     async search(query) {
       const [ddgData, wikiData] = await Promise.all([
         fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`)
