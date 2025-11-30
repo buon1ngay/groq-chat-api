@@ -121,9 +121,9 @@ async function needsWebSearch(message) {
     /mới nhất|gần đây|vừa rồi|hôm (nay|qua)/i,
     /giá|tỷ giá|bao nhiêu tiền/i,
     /tin tức|sự kiện|cập nhật/i,
-    /ai là|who is|là ai/i,
-    /khi nào|when|bao giờ/i,
-    /ở đâu|where|tại đâu/i,
+    /ai là|ai đã|là ai/i,
+    /khi nào|lúc nào|bao giờ/i,
+    /ở đâu|chỗ nào|tại đâu/i,
   ];
   if (triggers.some(r => r.test(message))) return true;
 
@@ -252,12 +252,7 @@ export default async function handler(req, res) {
       stream: false
     });
 
-    let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
-    if (usedSearch) {
-      assistantMessage = assistantMessage.split('\n')
-        .filter(line => !line.match(/🌐|💻|tôi (đã tìm|tìm thấy|nhớ lại)|vui lòng|cậu chủ|dựa trên web|không có khả năng/))
-        .join('\n').replace(/\n{3,}/g,'\n\n').trim();
-    }
+    let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi'
 
     const memoryExtraction = await extractMemory(message, userMemory);
     let memoryUpdated = false;
