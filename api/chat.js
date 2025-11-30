@@ -19,8 +19,8 @@ const API_KEYS = [
 
 // 🤖 CẤU HÌNH MODEL - CHỈ SỬA Ở ĐÂY
 const MODELS = {
-  main: 'llama-3.3-70b-versatile',      // Model chính cho chat
-  search: 'llama-3.3-70b-versatile',    // Đổi sang 70b (limit cao hơn)
+  main: 'llama-3.1-8b-instant',      // Model chính cho chat
+  search: 'llama-3.1-8b-instant',    // Đổi sang 70b (limit cao hơn)
   memory: 'llama-3.1-8b-instant',       // Model trích xuất memory (nhẹ)
 };
 
