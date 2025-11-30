@@ -8,7 +8,7 @@ const redis = new Redis({
 
 // 🤖 CẤU HÌNH MODEL - CHỈ SỬA Ở ĐÂY
 const MODELS = {
-  main: 'llama-3.1-70b-versatile',      // Đổi sang 3.1 (nghe lời hơn)
+  main: 'llama-3.1-8b-instant',      // Đổi sang 3.1 (nghe lời hơn)
   search: 'llama-3.1-8b-instant',       // Model nhẹ cho search
   memory: 'llama-3.1-8b-instant'        // Model nhẹ cho memory
 };
