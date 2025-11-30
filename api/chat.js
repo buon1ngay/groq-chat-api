@@ -86,33 +86,51 @@ const SEARCH_APIS = [
 console.log(`🔍 Load ${SEARCH_APIS.length} Search APIs: ${SEARCH_APIS.map(a => a.name).join(', ')}`);
 
 let lastSearchApiIndex = -1;
+const inFlightSearches = {}; // throttle tạm thời
+
 async function searchWeb(query) {
   if (!SEARCH_APIS.length) return null;
 
-  // ================= CACHE SEARCH 15 PHÚT =================
   const cacheKey = `search:${query}`;
-  const cached = await redis.get(cacheKey);
-  if (cached) return cached;
 
-  for (let i = 0; i < SEARCH_APIS.length; i++) {
-    lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
-    const api = SEARCH_APIS[lastSearchApiIndex];
-    try {
-      console.log(`   Trying ${api.name}...`);
-      const result = await api.search(query);
-      if (result) {
-        await redis.setex(cacheKey, 900, result); // cache 15 phút
-        return result;
-      }
-    } catch (e) {
-      console.warn(`❌ ${api.name} error: ${e.message}`);
-      continue;
-    }
+  // ========== Throttle query ==========
+  if (inFlightSearches[query]) {
+    console.log(`⚠️ Query đang chạy, bỏ qua: ${query}`);
+    return null;
   }
-  console.warn('⚠️ All search APIs failed');
-  return null;
-}
+  inFlightSearches[query] = true;
 
+  try {
+    // ========== Try/catch cache ==========
+    let cached = null;
+    try { cached = await redis.get(cacheKey); } catch(e) { console.warn('Redis get failed:', e.message); }
+    if (cached) return cached;
+
+    for (let i = 0; i < SEARCH_APIS.length; i++) {
+      lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
+      const api = SEARCH_APIS[lastSearchApiIndex];
+      try {
+        console.log(`   Trying ${api.name}...`);
+        const result = await api.search(query);
+        if (result) {
+          // ========== Try/catch cache set ==========
+          try { await redis.setex(cacheKey, 900, result); } catch(e) { console.warn('Redis setex failed:', e.message); }
+          return result;
+        }
+      } catch (e) {
+        console.warn(`❌ ${api.name} error: ${e.message}`);
+        continue;
+      }
+    }
+
+    console.warn('⚠️ All search APIs failed');
+    return null;
+
+  } finally {
+    // Xóa throttle sau 3 giây
+    setTimeout(() => { delete inFlightSearches[query]; }, 3000);
+  }
+}
 // ==================== CẦN SEARCH ====================
 async function needsWebSearch(message) {
   const triggers = [
