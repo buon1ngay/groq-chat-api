@@ -6,11 +6,20 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
+// 🤖 CẤU HÌNH MODEL - CHỈ SỬA Ở ĐÂY
+const MODELS = {
+  main: 'llama-3.3-70b-versatile',      // Model chính cho chat
+  search: 'llama-3.3-70b-versatile',    // Model phát hiện cần search
+  memory: 'llama-3.3-70b-versatile'     // Model trích xuất memory
+};
+
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
   process.env.GROQ_API_KEY_3,
   process.env.GROQ_API_KEY_4,
+  process.env.GROQ_API_KEY_5,  // Thêm key mới ở đây
+  process.env.GROQ_API_KEY_6,
 ].filter(Boolean);
 
 if (API_KEYS.length === 0) {
@@ -257,7 +266,7 @@ CHỈ TRẢ VỀ "YES" hoặc "NO", không giải thích.`
           content: `Câu hỏi: "${message}"\n\nCần tìm kiếm web không?`
         }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: MODELS.search,
       temperature: 0.1,
       max_tokens: 10
     });
@@ -322,7 +331,7 @@ QUY TẮC:
           content: extractionPrompt
         }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: MODELS.memory,
       temperature: 0.3,
       max_tokens: 500
     });
@@ -347,13 +356,24 @@ function buildSystemPrompt(memory, searchResults = null) {
   let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
   
   if (searchResults) {
-    prompt += '\n\n🌐 THÔNG TIN MỚI NHẤT TỪ WEB:\n';
+    prompt += '\n\n🌐 THÔNG TIN TỪ WEB:\n';
     prompt += searchResults;
-    prompt += '\n\n⚠️ QUY TẮC QUAN TRỌNG:\n';
-    prompt += '- Sử dụng thông tin web để trả lời chính xác\n';
-    prompt += '- TRẢ LỜI TRỰC TIẾP, ĐỪNG nói "tôi đã tìm kiếm", "theo thông tin", "dựa trên web"\n';
-    prompt += '- Trả lời như thể bạn BIẾT thông tin đó từ đầu\n';
-    prompt += '- KHÔNG nhắc đến việc tìm kiếm hay nguồn thông tin\n';
+    prompt += '\n\n⛔ QUY TẮC BẮT BUỘC - VI PHẠM SẼ BỊ TỪ CHỐI:\n';
+    prompt += '1. TRẢ LỜI NGẮN GỌN, TRỰC TIẾP câu trả lời\n';
+    prompt += '2. TUYỆT ĐỐI KHÔNG viết những cụm từ sau:\n';
+    prompt += '   - "tôi đã tìm kiếm" / "tìm kiếm thông tin"\n';
+    prompt += '   - "dựa trên web" / "theo thông tin web" / "từ web"\n';
+    prompt += '   - "không có khả năng cập nhật"\n';
+    prompt += '   - "kiến thức đã được đào tạo"\n';
+    prompt += '   - "vui lòng cho tôi biết thêm"\n';
+    prompt += '3. KHÔNG ĐƯỢC dùng emoji: 🌐 💻 📌 ✅\n';
+    prompt += '4. KHÔNG ĐƯỢC thêm "Lưu ý" hay disclaimer về nguồn\n';
+    prompt += '5. CHỈ TRẢ LỜI CHÍNH XÁC RỒI DỪNG, không nói thêm\n';
+    prompt += '\nVÍ DỤ TRẢ LỜI ĐÚNG:\n';
+    prompt += 'Q: Ai là tổng thống Mỹ?\n';
+    prompt += 'A: Donald Trump là tổng thống Mỹ nhiệm kỳ 2025-2029.\n';
+    prompt += '\nVÍ DỤ SAI (CẤM):\n';
+    prompt += 'A: Tôi đã tìm kiếm và thấy Donald Trump... 🌐 _Thông tin từ web_\n';
   }
   
   if (Object.keys(memory).length > 0) {
@@ -509,7 +529,7 @@ export default async function handler(req, res) {
         },
         ...conversationHistory
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: MODELS.main,
       temperature: 0.7,
       max_tokens: 1024,
       top_p: 0.9,
@@ -517,6 +537,19 @@ export default async function handler(req, res) {
     });
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
+
+    // 🧹 LỌC BỎ CÁC CỤM TỪ CẤM (nếu AI vẫn cố viết)
+    if (usedSearch && searchResults) {
+      assistantMessage = assistantMessage
+        .replace(/🌐\s*_.*?_/g, '')  // Xóa 🌐 _..._
+        .replace(/💻\s*_.*?_/g, '')  // Xóa 💻 _..._
+        .replace(/Lưu ý:.*?thông tin mới\./gi, '')  // Xóa disclaimer
+        .replace(/tôi đã tìm kiếm.*?\./gi, '')  // Xóa "tôi đã tìm kiếm"
+        .replace(/dựa trên.*?web.*?\./gi, '')  // Xóa "dựa trên web"
+        .replace(/theo thông tin.*?\./gi, '')  // Xóa "theo thông tin"
+        .replace(/\n{3,}/g, '\n\n')  // Xóa nhiều newline
+        .trim();
+    }
 
     const memoryExtraction = await extractMemory(message, userMemory);
     
