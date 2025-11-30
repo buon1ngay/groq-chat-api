@@ -8,9 +8,9 @@ const redis = new Redis({
 
 // 🤖 CẤU HÌNH MODEL - CHỈ SỬA Ở ĐÂY
 const MODELS = {
-  main: 'llama-3.3-70b-versatile',      // Model chính cho chat
-  search: 'llama-3.3-70b-versatile',    // Model phát hiện cần search
-  memory: 'llama-3.3-70b-versatile'     // Model trích xuất memory
+  main: 'llama-3.1-70b-versatile',      // Đổi sang 3.1 (nghe lời hơn)
+  search: 'llama-3.1-8b-instant',       // Model nhẹ cho search
+  memory: 'llama-3.1-8b-instant'        // Model nhẹ cho memory
 };
 
 const API_KEYS = [
@@ -532,10 +532,15 @@ export default async function handler(req, res) {
         .filter(line => !line.includes('_thông tin'))
         .filter(line => !line.toLowerCase().includes('tôi đã tìm kiếm'))
         .filter(line => !line.toLowerCase().includes('tìm kiếm thông tin'))
+        .filter(line => !line.toLowerCase().includes('tôi tìm thấy'))
+        .filter(line => !line.toLowerCase().includes('tôi đã tìm thấy'))
+        .filter(line => !line.toLowerCase().includes('tôi nhớ lại rằng'))
         .filter(line => !line.toLowerCase().includes('dựa trên web'))
         .filter(line => !line.toLowerCase().includes('theo thông tin'))
         .filter(line => !line.toLowerCase().includes('không có khả năng cập nhật'))
         .filter(line => !line.toLowerCase().includes('kiến thức đã được đào tạo'))
+        .filter(line => !line.toLowerCase().includes('vui lòng cho tôi biết'))
+        .filter(line => !line.toLowerCase().includes('cậu chủ cần thông tin thêm'))
         .filter(line => !line.toLowerCase().includes('lưu ý:'))
         .join('\n')
         .replace(/\n{3,}/g, '\n\n')
