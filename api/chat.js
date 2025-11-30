@@ -19,9 +19,9 @@ const API_KEYS = [
 
 // 🤖 CẤU HÌNH MODEL - CHỈ SỬA Ở ĐÂY
 const MODELS = {
-  main: 'llama-3.1-8b-instant',      // Model chính cho chat
-  search: 'llama-3.1-8b-instant',       // Model phát hiện cần search (nhẹ, nhanh)
-  memory: 'llama-3.1-8b-instant',    // Model trích xuất memory
+  main: 'llama-3.3-70b-versatile',      // Model chính cho chat
+  search: 'llama-3.3-70b-versatile',    // Đổi sang 70b (limit cao hơn)
+  memory: 'llama-3.1-8b-instant',       // Model trích xuất memory (nhẹ)
 };
 
 if (API_KEYS.length === 0) {
@@ -214,10 +214,19 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
       return await groq.chat.completions.create(config);
     } catch (error) {
       lastError = error;
+      
+      // Token limit error - không retry, throw luôn
+      if (error.status === 413 || error.message?.includes('Request too large')) {
+        console.error('❌ Request too large! Reduce message size.');
+        throw new Error('Request quá lớn. Vui lòng gửi tin nhắn ngắn hơn hoặc bắt đầu cuộc trò chuyện mới.');
+      }
+      
+      // Rate limit - thử key khác
       if (error.status === 429 || error.message?.includes('rate_limit')) {
         console.warn(`⚠️ Rate limit, thử key khác (${attempt + 1}/${maxRetries})`);
         continue;
       }
+      
       throw error;
     }
   }
@@ -289,22 +298,18 @@ QUY TẮC:
 
 // ==================== SYSTEM PROMPT BUILDER ====================
 function buildSystemPrompt(memory, searchResults = null) {
-  let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh.';
+  let prompt = 'Bạn là KAMI, trợ lý AI thân thiện của Nguyễn Đức Thanh.';
 
   if (searchResults) {
-    prompt += '\n\nThông tin tham khảo:\n' + searchResults;
-    prompt += '\n\nHãy trả lời ngắn gọn, chính xác dựa trên thông tin trên.';
+    prompt += '\n\nDữ liệu:\n' + searchResults;
+    prompt += '\nTrả lời ngắn gọn dựa trên dữ liệu trên.';
   }
 
   if (Object.keys(memory).length > 0) {
-    prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
+    prompt += '\n\nThông tin user:\n';
     for (const [key, value] of Object.entries(memory)) {
-      prompt += `- ${key}: ${value}\n`;
+      prompt += `${key}: ${value}\n`;
     }
-    prompt += '\n⚠️ QUY TẮC:\n';
-    prompt += '- Sử dụng các thông tin này một cách TỰ NHIÊN trong cuộc trò chuyện\n';
-    prompt += '- ĐỪNG nhắc đi nhắc lại thông tin trừ khi được hỏi\n';
-    prompt += '- Thể hiện bạn NHỚ người dùng qua cách xưng hô, cách nói chuyện phù hợp\n';
   }
 
   return prompt;
@@ -367,7 +372,9 @@ export default async function handler(req, res) {
 
     // ==================== CHUYỂN MESSAGE VÀ CHAT ====================
     conversationHistory.push({ role: 'user', content: message });
-    if (conversationHistory.length > 50) conversationHistory = conversationHistory.slice(-50);
+    
+    // Giảm history để tránh vượt token limit (8b-instant chỉ 6000 TPM)
+    if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20);
 
     // ==================== WEB SEARCH ====================
     let searchResults = null;
@@ -380,11 +387,12 @@ export default async function handler(req, res) {
     }
 
     const systemPrompt = buildSystemPrompt(userMemory, searchResults);
+    
     const chatCompletion = await callGroqWithRetry({
       messages: [{ role: 'system', content: systemPrompt }, ...conversationHistory],
       model: MODELS.main,
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 512,  // ⚡ Giảm từ 1024 → 512
       top_p: 0.9,
       stream: false
     });
