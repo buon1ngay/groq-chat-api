@@ -522,16 +522,23 @@ export default async function handler(req, res) {
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
-    // 🧹 LỌC BỎ CÁC CỤM TỪ CẤM (nếu AI vẫn cố viết)
+    // 🧹 CHỈ FILTER KHI ĐÃ DÙNG WEB SEARCH
     if (usedSearch && searchResults) {
       assistantMessage = assistantMessage
-        .replace(/🌐\s*_.*?_/g, '')  // Xóa 🌐 _..._
-        .replace(/💻\s*_.*?_/g, '')  // Xóa 💻 _..._
-        .replace(/Lưu ý:.*?thông tin mới\./gi, '')  // Xóa disclaimer
-        .replace(/tôi đã tìm kiếm.*?\./gi, '')  // Xóa "tôi đã tìm kiếm"
-        .replace(/dựa trên.*?web.*?\./gi, '')  // Xóa "dựa trên web"
-        .replace(/theo thông tin.*?\./gi, '')  // Xóa "theo thông tin"
-        .replace(/\n{3,}/g, '\n\n')  // Xóa nhiều newline
+        .split('\n')
+        .filter(line => !line.includes('🌐'))
+        .filter(line => !line.includes('💻'))
+        .filter(line => !line.includes('_Thông tin'))
+        .filter(line => !line.includes('_thông tin'))
+        .filter(line => !line.toLowerCase().includes('tôi đã tìm kiếm'))
+        .filter(line => !line.toLowerCase().includes('tìm kiếm thông tin'))
+        .filter(line => !line.toLowerCase().includes('dựa trên web'))
+        .filter(line => !line.toLowerCase().includes('theo thông tin'))
+        .filter(line => !line.toLowerCase().includes('không có khả năng cập nhật'))
+        .filter(line => !line.toLowerCase().includes('kiến thức đã được đào tạo'))
+        .filter(line => !line.toLowerCase().includes('lưu ý:'))
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
         .trim();
     }
 
