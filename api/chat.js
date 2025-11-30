@@ -353,27 +353,11 @@ QUY TẮC:
 }
 
 function buildSystemPrompt(memory, searchResults = null) {
-  let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
+  let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh.';
   
   if (searchResults) {
-    prompt += '\n\n🌐 THÔNG TIN TỪ WEB:\n';
-    prompt += searchResults;
-    prompt += '\n\n⛔ QUY TẮC BẮT BUỘC - VI PHẠM SẼ BỊ TỪ CHỐI:\n';
-    prompt += '1. TRẢ LỜI NGẮN GỌN, TRỰC TIẾP câu trả lời\n';
-    prompt += '2. TUYỆT ĐỐI KHÔNG viết những cụm từ sau:\n';
-    prompt += '   - "tôi đã tìm kiếm" / "tìm kiếm thông tin"\n';
-    prompt += '   - "dựa trên web" / "theo thông tin web" / "từ web"\n';
-    prompt += '   - "không có khả năng cập nhật"\n';
-    prompt += '   - "kiến thức đã được đào tạo"\n';
-    prompt += '   - "vui lòng cho tôi biết thêm"\n';
-    prompt += '3. KHÔNG ĐƯỢC dùng emoji: 🌐 💻 📌 ✅\n';
-    prompt += '4. KHÔNG ĐƯỢC thêm "Lưu ý" hay disclaimer về nguồn\n';
-    prompt += '5. CHỈ TRẢ LỜI CHÍNH XÁC RỒI DỪNG, không nói thêm\n';
-    prompt += '\nVÍ DỤ TRẢ LỜI ĐÚNG:\n';
-    prompt += 'Q: Ai là tổng thống Mỹ?\n';
-    prompt += 'A: Donald Trump là tổng thống Mỹ nhiệm kỳ 2025-2029.\n';
-    prompt += '\nVÍ DỤ SAI (CẤM):\n';
-    prompt += 'A: Tôi đã tìm kiếm và thấy Donald Trump... 🌐 _Thông tin từ web_\n';
+    prompt += '\n\nThông tin tham khảo:\n' + searchResults;
+    prompt += '\n\nHãy trả lời ngắn gọn, chính xác dựa trên thông tin trên.';
   }
   
   if (Object.keys(memory).length > 0) {
