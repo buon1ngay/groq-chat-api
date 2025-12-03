@@ -146,7 +146,7 @@ async function searchWeb(query) {
 // ==================== CẦN SEARCH ====================
 async function needsWebSearch(message) {
   const triggers = [
-    /hiện (tại|nay|giờ)|bây giờ|lúc này|đang diễn ra/i,
+    /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm lại|xem lại|tìm đi|sắp tới|năm nào|đang diễn ra/i,
     /năm (19|20)\d{2}/i,
     /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)/i,
     /giá|tỷ giá|bao nhiêu tiền|chi phí/i,
@@ -169,7 +169,7 @@ async function needsWebSearch(message) {
         ],
         model: MODELS.search,
         temperature: 0.1,
-        max_tokens: 10
+        max_tokens: 20
       });
       const ans = response.choices[0]?.message?.content?.trim().toUpperCase();
       return ans === 'YES';
@@ -234,7 +234,7 @@ Trả về JSON:
       ],
       model: MODELS.memory,
       temperature: 0.2,
-      max_tokens: 200
+      max_tokens: 300
     });
     
     const content = response.choices[0]?.message?.content || '{}';
@@ -258,13 +258,7 @@ Trả về JSON:
 
 // ==================== SYSTEM PROMPT ====================
 function buildSystemPrompt(memory, searchResults = null) {
-  let prompt = `Bạn là KAMI, trợ lý AI thân thiện, hữu ích và chuyên nghiệp.
-
-QUY TẮC:
-- Trả lời ngắn gọn, rõ ràng
-- Sử dụng emoji phù hợp
-- Thân thiện nhưng không nói nhiều
-- Nếu không biết, hãy thừa nhận`;
+  let prompt = `Bạn là KAMI, AI chuyên nghiệp với kiến thức rộng. Được tạo bởi Nguyễn Đức Thạnh. Hãy trả lời chi tiết, có ví dụ, giải thích rõ ràng. Sử dụng emoji phù hợp để tạo không khí thân thiện. Nếu user hỏi, hãy kể câu chuyện sinh động`;
 
   if (searchResults) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM:\n${searchResults}\n\n⚠️ Ưu tiên dùng dữ liệu trên để trả lời.`;
@@ -393,8 +387,8 @@ export default async function handler(req, res) {
 
     conversationHistory.push({ role: 'user', content: message });
     
-    if (conversationHistory.length > 30) {
-      conversationHistory = conversationHistory.slice(-30);
+    if (conversationHistory.length > 50) {
+      conversationHistory = conversationHistory.slice(-50);
     }
 
     let searchResults = null;
@@ -418,7 +412,7 @@ export default async function handler(req, res) {
       ],
       model: MODELS.main,
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 2048,
       top_p: 0.9,
       stream: false
     });
