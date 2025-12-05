@@ -7,7 +7,7 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// ==================== API KEYS & MODEL ====================
+// ==================== API KEYS & MODELS ====================
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
@@ -22,12 +22,13 @@ const MODELS = {
   search: 'llama-3.1-8b-instant',
   memory: 'llama-3.1-8b-instant',
   smart: 'llama-3.3-70b-versatile',
+  vision: 'llama-3.2-90b-vision-preview', // ← NEW: Vision model
 };
 
 if (API_KEYS.length === 0) throw new Error('❌ Không tìm thấy GROQ_API_KEY!');
 
 console.log(`🔑 Load ${API_KEYS.length} GROQ API keys`);
-console.log(`🤖 Models: Main=${MODELS.main}, Search=${MODELS.search}, Memory=${MODELS.memory}`);
+console.log(`🤖 Models: Main=${MODELS.main}, Vision=${MODELS.vision}, Search=${MODELS.search}`);
 
 let lastGroqKeyIndex = -1;
 function createGroqClient() {
@@ -35,7 +36,7 @@ function createGroqClient() {
   return new Groq({ apiKey: API_KEYS[lastGroqKeyIndex] });
 }
 
-// ==================== SEARCH APIs - XOAY VÒNG ====================
+// ==================== SEARCH APIs ====================
 const SEARCH_APIS = [
   {
     name: 'Serper',
@@ -43,7 +44,7 @@ const SEARCH_APIS = [
     enabled: !!process.env.SERPER_API_KEY,
     async search(query) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      const timer = setTimeout(() => controller.abort(), 10000);
       
       try {
         const resp = await fetch('https://google.serper.dev/search', {
@@ -127,6 +128,157 @@ console.log(`🔍 Load ${SEARCH_APIS.length} Search APIs: ${SEARCH_APIS.map(a =>
 let lastSearchApiIndex = -1;
 const inFlightSearches = {};
 
+// Interval cleanup
+setInterval(() => {
+  const now = Date.now();
+  for (const [query, timestamp] of Object.entries(inFlightSearches)) {
+    if (now - timestamp > 10000) {
+      delete inFlightSearches[query];
+      console.log(`🧹 Cleaned up stale search: ${query}`);
+    }
+  }
+}, 5000);
+
+// ==================== 🎨 IMAGE ANALYSIS (GROQ VISION) ====================
+async function analyzeImage(imageBase64, userPrompt = null) {
+  try {
+    console.log('🎨 Analyzing image with Groq Vision...');
+    
+    // Validate base64
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+      throw new Error('Invalid image data');
+    }
+    
+    // Remove data URL prefix if present
+    const base64Data = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+    
+    const defaultPrompt = `Phân tích chi tiết hình ảnh này. Hãy mô tả:
+1. Nội dung chính (đối tượng, con người, cảnh vật)
+2. Màu sắc và bố cục
+3. Cảm xúc hoặc thông điệp (nếu có)
+4. Bất kỳ văn bản nào trong ảnh
+5. Chất lượng và đề xuất cải thiện (nếu cần)
+
+Trả lời bằng tiếng Việt, chi tiết nhưng súc tích.`;
+
+    const response = await callGroqWithRetry({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: userPrompt || defaultPrompt
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Data}`
+              }
+            }
+          ]
+        }
+      ],
+      model: MODELS.vision,
+      temperature: 0.5,
+      max_tokens: 1500
+    });
+    
+    const analysis = response.choices[0]?.message?.content || 'Không thể phân tích ảnh.';
+    console.log('✅ Image analyzed successfully');
+    return analysis;
+    
+  } catch (e) {
+    console.error('❌ Image analysis failed:', e.message);
+    throw new Error(`Lỗi phân tích ảnh: ${e.message}`);
+  }
+}
+
+// ==================== 🖼️ IMAGE EDITING SUGGESTIONS ====================
+async function suggestImageEdits(imageBase64, editRequest) {
+  try {
+    console.log('🖼️ Generating image edit suggestions...');
+    
+    const base64Data = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+    
+    const editPrompt = `Dựa trên hình ảnh này, hãy đưa ra hướng dẫn chi tiết để:
+${editRequest}
+
+Hãy cung cấp:
+1. Phân tích vấn đề hiện tại trong ảnh
+2. Các bước chỉnh sửa cụ thể (có thể dùng app như Snapseed, Lightroom, PicsArt)
+3. Thông số đề xuất (độ sáng, độ tương phản, bão hòa, v.v.)
+4. Lời khuyên về composition hoặc cropping
+5. Kỹ thuật nâng cao nếu cần
+
+Trả lời bằng tiếng Việt, dễ hiểu cho người mới bắt đầu.`;
+
+    const response = await callGroqWithRetry({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: editPrompt },
+            {
+              type: 'image_url',
+              image_url: { url: `data:image/jpeg;base64,${base64Data}` }
+            }
+          ]
+        }
+      ],
+      model: MODELS.vision,
+      temperature: 0.6,
+      max_tokens: 2000
+    });
+    
+    const suggestions = response.choices[0]?.message?.content || 'Không thể tạo gợi ý.';
+    console.log('✅ Edit suggestions generated');
+    return suggestions;
+    
+  } catch (e) {
+    console.error('❌ Edit suggestions failed:', e.message);
+    throw new Error(`Lỗi tạo gợi ý: ${e.message}`);
+  }
+}
+
+// ==================== 📸 OCR - TEXT EXTRACTION ====================
+async function extractTextFromImage(imageBase64) {
+  try {
+    console.log('📸 Extracting text from image...');
+    
+    const base64Data = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+    
+    const response = await callGroqWithRetry({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Trích xuất TẤT CẢ văn bản trong ảnh này. Giữ nguyên định dạng và bố cục. Nếu không có văn bản, trả về "Không có văn bản".'
+            },
+            {
+              type: 'image_url',
+              image_url: { url: `data:image/jpeg;base64,${base64Data}` }
+            }
+          ]
+        }
+      ],
+      model: MODELS.vision,
+      temperature: 0.1,
+      max_tokens: 1000
+    });
+    
+    const extractedText = response.choices[0]?.message?.content || 'Không tìm thấy văn bản.';
+    console.log('✅ Text extracted successfully');
+    return extractedText;
+    
+  } catch (e) {
+    console.error('❌ Text extraction failed:', e.message);
+    throw new Error(`Lỗi trích xuất văn bản: ${e.message}`);
+  }
+}
+
 // ==================== EXTRACT SEARCH KEYWORDS ====================
 async function extractSearchKeywords(message) {
   try {
@@ -134,7 +286,7 @@ async function extractSearchKeywords(message) {
       messages: [
         { 
           role: 'system', 
-          content: 'Trích xuất 3-5 từ khóa chính để search Google. CHỈ TRẢ TỪ KHÓA, KHÔNG GIẢI THÍCH. Ví dụ: "giá vàng hôm nay", "thời tiết Hà Nội", "tỷ giá USD VND"' 
+          content: 'Trích xuất 3-5 từ khóa chính để search Google. CHỈ TRẢ TỪ KHÓA, KHÔNG GIẢI THÍCH.' 
         },
         { role: 'user', content: `Câu hỏi: "${message}"\n\nTừ khóa search:` }
       ],
@@ -154,7 +306,7 @@ async function extractSearchKeywords(message) {
 
 // ==================== SUMMARIZE SEARCH RESULTS ====================
 async function summarizeSearchResults(results, question) {
-  if (!results || results.length < 100) return results;
+  if (!results || results.length < 500) return results;
   
   try {
     const response = await callGroqWithRetry({
@@ -182,26 +334,20 @@ async function summarizeSearchResults(results, question) {
   }
 }
 
-// ==================== SEARCH WEB (IMPROVED) ====================
+// ==================== SEARCH WEB ====================
 async function searchWeb(query) {
-  if (!SEARCH_APIS.length) {
-    console.warn('⚠️ No search APIs available');
-    return null;
-  }
+  if (!SEARCH_APIS.length) return null;
 
-  // Chuẩn hóa query để tránh cache duplicate
   const cleanedQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanedQuery}`;
 
-  // Chống spam query
   if (inFlightSearches[cleanedQuery]) {
-    console.log(`⚠️ Query đang chạy, bỏ qua: ${cleanedQuery}`);
-    return null;
+    console.log(`⚠️ Query đang chạy: ${cleanedQuery}`);
+    return 'SEARCH_IN_PROGRESS';
   }
-  inFlightSearches[cleanedQuery] = true;
+  inFlightSearches[cleanedQuery] = Date.now();
 
   try {
-    // Check cache trước
     let cached = null;
     try { 
       cached = await redis.get(cacheKey);
@@ -213,10 +359,9 @@ async function searchWeb(query) {
         return cached;
       }
     } catch(e) { 
-      console.warn('⚠️ Redis get cache failed:', e.message); 
+      console.warn('⚠️ Redis get failed:', e.message); 
     }
 
-    // Thử từng API
     for (let i = 0; i < SEARCH_APIS.length; i++) {
       lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
       const api = SEARCH_APIS[lastSearchApiIndex];
@@ -225,19 +370,15 @@ async function searchWeb(query) {
         console.log(`🔎 Trying ${api.name}...`);
         const result = await api.search(cleanedQuery);
         
-        // Validate quality
         if (result && result.length >= 50) {
-          // Cache result
           try { 
-            await redis.set(cacheKey, JSON.stringify(result), { ex: 1800 }); // Modern syntax
+            await redis.set(cacheKey, JSON.stringify(result), { ex: 1800 });
           } catch(e) { 
             console.warn('⚠️ Redis set failed:', e.message); 
           }
           
-          console.log(`✅ ${api.name} success (${result.length} chars)`);
+          console.log(`✅ ${api.name} success`);
           return result;
-        } else {
-          console.warn(`⚠️ ${api.name} returned insufficient data, trying next...`);
         }
       } catch (e) {
         console.warn(`❌ ${api.name} error: ${e.message}`);
@@ -245,45 +386,69 @@ async function searchWeb(query) {
       }
     }
 
-    console.warn('⚠️ All search APIs failed or returned insufficient data');
+    console.warn('⚠️ All search APIs failed');
     return null;
 
   } finally {
-    setTimeout(() => { delete inFlightSearches[cleanedQuery]; }, 3000);
+    // Interval will clean up
   }
 }
 
-// ==================== PHÂN TÍCH Ý ĐỊNH ====================
-async function analyzeIntent(message, history) {
+// ==================== ANALYZE INTENT ====================
+async function analyzeIntent(message, history, hasImage = false) {
   const triggers = {
-    search: /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm|tra|search|năm (19|20)\d{2}|mới nhất|gần đây|tin tức|thời tiết|giá|tỷ giá|cập nhật|xu hướng/i,
-    creative: /viết|kể|sáng tác|làm thơ|bài hát|câu chuyện|truyện|story/i,
-    technical: /code|lập trình|debug|fix|algorithm|function|class|git|api|database/i,
-    calculation: /tính|calculate|\d+\s*[\+\-\*\/\=\^]\s*\d+|phương trình|toán|bao nhiêu\s+\d/i,
-    explanation: /giải thích|tại sao|vì sao|làm sao|như thế nào|why|how|explain|thế nào là/i,
-    comparison: /so sánh|khác nhau|tốt hơn|nên chọn|đâu là|hay hơn/i,
+    search: /\b(hiện tại|hiện nay|bây giờ|lúc này|hôm nay|hôm qua)\b|tìm kiếm|tra cứu|năm (19|20)\d{2}|mới nhất|gần đây|tin tức|thời tiết|giá cả|tỷ giá/i,
+    creative: /viết|kể|sáng tác|làm thơ|bài hát|câu chuyện|truyện/i,
+    technical: /code|lập trình|debug|fix|algorithm|function|class|git|api|database|sửa lỗi/i,
+    calculation: /tính toán|calculate|\d+\s*[\+\-\*\/\=\^]\s*\d+|phương trình|toán/i,
+    explanation: /giải thích|tại sao|vì sao|làm sao|như thế nào|why|how|explain/i,
+    comparison: /so sánh|khác nhau|tốt hơn|nên chọn/i,
+    // ← NEW: Image-related triggers
+    image_analysis: /ảnh|hình|photo|image|phân tích ảnh|mô tả ảnh|trong ảnh|xem ảnh/i,
+    image_edit: /chỉnh|edit|sửa ảnh|cải thiện|photoshop|filter|màu sắc|độ sáng/i,
+    ocr: /đọc chữ|text trong ảnh|văn bản|trích xuất|ocr|chữ trong ảnh/i,
   };
 
   let intent = {
     type: 'general',
     needsSearch: false,
     complexity: 'simple',
-    needsDeepThinking: false
+    needsDeepThinking: false,
+    hasImage: hasImage
   };
 
-  // Phát hiện intent
-  if (triggers.search.test(message)) {
+  // Image-related intent có priority cao nhất
+  if (hasImage) {
+    if (triggers.ocr.test(message)) {
+      intent.type = 'ocr';
+      intent.complexity = 'simple';
+    } else if (triggers.image_edit.test(message)) {
+      intent.type = 'image_edit';
+      intent.complexity = 'medium';
+    } else if (triggers.image_analysis.test(message) || message.length < 20) {
+      intent.type = 'image_analysis';
+      intent.complexity = 'simple';
+    } else {
+      // Có ảnh nhưng không rõ intent → mặc định analysis
+      intent.type = 'image_analysis';
+      intent.complexity = 'simple';
+    }
+    return intent;
+  }
+
+  // Normal intent detection
+  if (triggers.technical.test(message)) {
+    intent.type = 'technical';
+    intent.complexity = 'complex';
+  } else if (triggers.search.test(message)) {
     intent.type = 'search';
     intent.needsSearch = true;
   } else if (triggers.comparison.test(message)) {
     intent.type = 'comparison';
-    intent.needsSearch = true; // So sánh thường cần data mới
+    intent.needsSearch = true;
   } else if (triggers.creative.test(message)) {
     intent.type = 'creative';
     intent.complexity = 'medium';
-  } else if (triggers.technical.test(message)) {
-    intent.type = 'technical';
-    intent.complexity = 'complex';
   } else if (triggers.calculation.test(message)) {
     intent.type = 'calculation';
     intent.needsDeepThinking = true;
@@ -292,76 +457,35 @@ async function analyzeIntent(message, history) {
     intent.needsDeepThinking = true;
   }
 
-  // Đánh giá độ phức tạp
   if (message.length > 200 || message.split('?').length > 2) {
     intent.complexity = 'complex';
     intent.needsDeepThinking = true;
   }
 
-  // Context từ lịch sử
-  if (history.length > 5) {
-    const recentTopics = history.slice(-5).map(h => h.content).join(' ');
-    if (recentTopics.includes('code') || recentTopics.includes('lập trình')) {
-      intent.contextAware = 'technical';
-    }
-  }
-
   return intent;
 }
 
-// ==================== CẦN SEARCH THÔNG MINH ====================
+// ==================== NEEDS WEB SEARCH ====================
 async function needsWebSearch(message, intent) {
-  // Ưu tiên intent
+  if (intent.type === 'technical' || intent.hasImage) return false;
   if (intent.needsSearch) return true;
 
   const triggers = [
-    /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm lại|xem lại|tìm đi|sắp tới|năm nào|đang diễn ra/i,
+    /\b(hiện tại|hiện nay|bây giờ|lúc này|hôm nay|hôm qua)\b.*\?/i,
     /năm (19|20)\d{2}/i,
-    /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)|tháng (này|trước)/i,
-    /giá|tỷ giá|bao nhiêu tiền|chi phí|price|cost/i,
-    /tin tức|sự kiện|cập nhật|thông tin|news|update/i,
-    /ai là|ai đã|là ai|người nào|who is/i,
-    /khi nào|lúc nào|bao giờ|thời gian|when/i,
-    /ở đâu|chỗ nào|tại đâu|địa điểm|where/i,
-    /thời tiết|nhiệt độ|khí hậu|weather|temperature/i,
-    /tỷ số|kết quả|đội|trận đấu|score|match/i,
-    /thế nào là|như thế nào về|cập nhật về|xu hướng|thay đổi/i,
-    /so sánh|khác nhau|tốt hơn|nên chọn|đâu là/i,
-    /\d+\s*(năm|tháng|tuần|ngày)\s*(trước|sau|tới|nữa)/i, // Thời gian tương đối
+    /mới nhất|gần đây|vừa rồi|tuần (này|trước)/i,
+    /giá|tỷ giá|bao nhiêu tiền|chi phí/i,
+    /tin tức|sự kiện|cập nhật|thông tin mới/i,
+    /\b(ai là|ai đã|là ai)\b.*\?/i,
+    /\b(khi nào|lúc nào|bao giờ)\b.*\?/i,
+    /\b(ở đâu|chỗ nào|tại đâu)\b.*\?/i,
+    /thời tiết|nhiệt độ|weather/i,
+    /tỷ số|kết quả|trận đấu/i,
+    /xu hướng|thay đổi|phát triển.*mới/i,
+    /\d+\s*(năm|tháng|tuần|ngày)\s*(trước|sau|tới)/i,
   ];
   
-  if (triggers.some(r => r.test(message))) return true;
-
-  // LLM validation cho câu hỏi ngắn
-  if (message.includes('?') && message.length < 150) {
-    try {
-      const response = await callGroqWithRetry({
-        messages: [
-          { 
-            role: 'system', 
-            content: `Phân tích câu hỏi có CẦN TÌM KIẾM THÔNG TIN MỚI NHẤT trên web không?
-            
-Trả "YES" nếu cần dữ liệu thời gian thực: tin tức, giá cả, thời tiết, sự kiện hiện tại, xu hướng mới, so sánh sản phẩm/công nghệ mới.
-Trả "NO" nếu là câu hỏi về kiến thức chung, lý thuyết, lịch sử đã biết, định nghĩa, cách làm cơ bản.
-
-CHỈ TRẢ YES HOẶC NO.` 
-          },
-          { role: 'user', content: message }
-        ],
-        model: MODELS.search,
-        temperature: 0.1,
-        max_tokens: 10
-      });
-      
-      const ans = response.choices[0]?.message?.content?.trim().toUpperCase();
-      return ans.includes('YES');
-    } catch (e) {
-      console.warn('⚠️ needsWebSearch LLM call failed:', e.message);
-      return false;
-    }
-  }
-  
-  return false;
+  return triggers.some(r => r.test(message));
 }
 
 // ==================== CALL GROQ RETRY ====================
@@ -390,33 +514,22 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
       throw e;
     }
   }
-  throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError.message}`);
+  throw new Error(`❌ Hết ${maxRetries} API keys: ${lastError.message}`);
 }
 
-// ==================== MEMORY EXTRACTION NÂNG CAO ====================
+// ==================== MEMORY & OTHER FUNCTIONS ====================
 async function extractMemory(message, currentMemory) {
   try {
-    const prompt = `Phân tích tin nhắn và trích xuất thông tin CÁ NHÂN của user (tên, tuổi, nghề nghiệp, sở thích, tính cách, mối quan hệ, mục tiêu, ngôn ngữ ưa thích...).
+    const prompt = `Phân tích tin nhắn và trích xuất thông tin CÁ NHÂN của user.
 
 TIN NHẮN: "${message}"
-
 THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
 
-Quy tắc:
-- Chỉ lưu thông tin CHẮC CHẮN và QUAN TRỌNG
-- Cập nhật nếu có thông tin mới chính xác hơn
-- Không lưu thông tin tạm thời (như "đang đói", "đang buồn")
-
-Trả về JSON:
-{
-  "hasNewInfo": true/false,
-  "updates": { "key": "giá trị cụ thể" },
-  "summary": "Tóm tắt ngắn"
-}`;
+Trả về JSON: {"hasNewInfo": true/false, "updates": {}, "summary": ""}`;
 
     const response = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG TEXT KHÁC.' },
+        { role: 'system', content: 'CHỈ TRẢ JSON THUẦN.' },
         { role: 'user', content: prompt }
       ],
       model: MODELS.memory,
@@ -426,111 +539,75 @@ Trả về JSON:
     
     const content = response.choices[0]?.message?.content || '{}';
     const jsonMatch = content.match(/\{[\s\S]*\}/);
-    
     if (!jsonMatch) return { hasNewInfo: false };
     
     const parsed = JSON.parse(jsonMatch[0]);
-    
-    if (parsed.hasNewInfo && !parsed.updates) {
-      return { hasNewInfo: false };
-    }
+    if (parsed.hasNewInfo && !parsed.updates) return { hasNewInfo: false };
     
     return parsed;
-    
   } catch (e) {
-    console.warn('⚠️ Memory extraction failed:', e.message);
+    console.warn('⚠️ Memory extraction failed');
     return { hasNewInfo: false };
   }
 }
 
-// ==================== TƯ DUY SÂU (CHAIN OF THOUGHT) ====================
 async function deepThinking(message, context) {
   try {
-    console.log('🧠 Activating deep thinking mode...');
-    
-    const thinkingPrompt = `Phân tích câu hỏi sau theo từng bước logic:
-
-CÂU HỎI: "${message}"
-
-Hãy:
-1. Xác định vấn đề cốt lõi
-2. Liệt kê các yếu tố cần xem xét
-3. Phân tích từng khía cạnh
-4. Đưa ra kết luận logic
-
-TRẢ LỜI NGẮN GỌN BẰNG TIẾNG VIỆT:`;
-
+    console.log('🧠 Deep thinking...');
     const response = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: 'Bạn là trợ lý phân tích logic chuyên sâu.' },
-        { role: 'user', content: thinkingPrompt }
+        { role: 'system', content: 'Phân tích logic chuyên sâu.' },
+        { role: 'user', content: `Phân tích: "${message}"` }
       ],
       model: MODELS.smart,
       temperature: 0.6,
       max_tokens: 800
     });
-    
     return response.choices[0]?.message?.content || null;
   } catch (e) {
-    console.warn('⚠️ Deep thinking failed:', e.message);
     return null;
   }
 }
 
-// ==================== SYSTEM PROMPT THÔNG MINH ====================
-function buildSystemPrompt(memory, searchResults = null, intent = null, deepThought = null) {
-  let prompt = `Bạn là KAMI, một AI thông minh, chính xác và có tư duy phản biện, được tạo ra bởi Nguyễn Đức Thạnh.
+function buildSystemPrompt(memory, searchResults, intent, deepThought, imageAnalysis) {
+  let prompt = `Bạn là KAMI, AI thông minh của Nguyễn Đức Thạnh.
 
-🎯 NGUYÊN TẮC CORE:
-1. **Ngôn ngữ & Phong cách**: Trả lời bằng tiếng Việt trừ khi được yêu cầu. Xưng "tôi", gọi user tùy tiền tố họ chọn. Giọng điệu thân thiện nhưng chuyên nghiệp.
+🎯 NGUYÊN TẮC:
+- Trả lời tiếng Việt, chính xác, thân thiện
+- Thừa nhận khi không chắc
+- Trích dẫn nguồn khi dùng search
+- Phân tích kỹ trước khi trả lời`;
 
-2. **Độ chính xác cao**: 
-   - Phân tích kỹ trước khi trả lời
-   - Thừa nhận khi không chắc chắn
-   - Đưa ra nhiều góc nhìn cho vấn đề phức tạp
-   - Trích dẫn nguồn khi có thông tin từ tìm kiếm
-
-3. **Tư duy phản biện**:
-   - Đặt câu hỏi ngược lại để hiểu rõ hơn nếu cần
-   - Chỉ ra các lỗ hổng logic nếu có
-   - Đưa ra phản ví dụ khi thích hợp
-
-4. **Tùy biến theo ngữ cảnh**:
-   - Kỹ thuật: chi tiết, code examples, best practices
-   - Sáng tạo: sinh động, cảm xúc, kể chuyện
-   - Giải thích: từng bước, dễ hiểu, ví dụ thực tế
-   - Tính toán: logic rõ ràng, công thức, kiểm tra kết quả
-
-5. **Emoji & Format**: Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.`;
-
-  // Thêm context từ intent
   if (intent) {
-    prompt += `\n\n📋 LOẠI YÊU CẦU: ${intent.type} (độ phức tạp: ${intent.complexity})`;
+    prompt += `\n\n📋 LOẠI: ${intent.type} (${intent.complexity})`;
     
-    if (intent.type === 'technical') {
-      prompt += '\n💡 Chế độ kỹ thuật: Cung cấp code examples, giải thích chi tiết, đề xuất best practices.';
+    if (intent.type === 'image_analysis') {
+      prompt += '\n🎨 Chế độ phân tích ảnh: Mô tả chi tiết, màu sắc, bố cục, cảm xúc.';
+    } else if (intent.type === 'image_edit') {
+      prompt += '\n🖼️ Chế độ chỉnh sửa: Hướng dẫn cụ thể, thông số rõ ràng, dễ hiểu.';
+    } else if (intent.type === 'ocr') {
+      prompt += '\n📸 Chế độ OCR: Trích xuất văn bản chính xác, giữ định dạng.';
+    } else if (intent.type === 'technical') {
+      prompt += '\n💡 Kỹ thuật: Code examples, best practices.';
     } else if (intent.type === 'creative') {
-      prompt += '\n🎨 Chế độ sáng tạo: Tập trung vào tính sinh động, cảm xúc, chi tiết miêu tả.';
-    } else if (intent.type === 'explanation') {
-      prompt += '\n📚 Chế độ giải thích: Phân tích từng bước, dùng ví dụ dễ hiểu, so sánh tương đồng.';
-    } else if (intent.type === 'comparison') {
-      prompt += '\n⚖️ Chế độ so sánh: Phân tích ưu/nhược điểm, đưa ra bảng so sánh nếu có thể.';
+      prompt += '\n🎨 Sáng tạo: Sinh động, cảm xúc.';
     }
   }
 
-  // Thêm deep thinking
   if (deepThought) {
-    prompt += `\n\n🧠 PHÂN TÍCH SÂU:\n${deepThought}\n\n⚠️ Dùng phân tích trên làm nền tảng cho câu trả lời.`;
+    prompt += `\n\n🧠 PHÂN TÍCH:\n${deepThought}`;
   }
 
-  // Thêm search results
+  if (imageAnalysis) {
+    prompt += `\n\n🎨 PHÂN TÍCH ẢNH:\n${imageAnalysis}\n\n⚠️ Dùng thông tin từ ảnh để trả lời.`;
+  }
+
   if (searchResults) {
-    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM CẬP NHẬT:\n${searchResults}\n\n⚠️ QUAN TRỌNG: Ưu tiên dùng dữ liệu mới nhất này. Trích dẫn nguồn khi sử dụng (nếu có link/tên nguồn).`;
+    prompt += `\n\n📊 DỮ LIỆU SEARCH:\n${searchResults}\n\n⚠️ Ưu tiên dữ liệu này.`;
   }
   
-  // Thêm memory
   if (Object.keys(memory).length) {
-    prompt += '\n\n👤 THÔNG TIN USER (cá nhân hóa câu trả lời):';
+    prompt += '\n\n👤 THÔNG TIN USER:';
     for (const [k, v] of Object.entries(memory)) {
       prompt += `\n• ${k}: ${v}`;
     }
@@ -539,7 +616,6 @@ function buildSystemPrompt(memory, searchResults = null, intent = null, deepThou
   return prompt;
 }
 
-// ==================== SAFE REDIS ====================
 async function safeRedisGet(key, defaultValue = null) {
   try {
     const data = await redis.get(key);
@@ -547,7 +623,7 @@ async function safeRedisGet(key, defaultValue = null) {
     if (typeof data === 'object') return data;
     try { return JSON.parse(data); } catch { return data; }
   } catch (e) {
-    console.error(`❌ Redis GET failed for key ${key}:`, e.message);
+    console.error(`❌ Redis GET failed: ${key}`);
     return defaultValue;
   }
 }
@@ -562,23 +638,21 @@ async function safeRedisSet(key, value, expirySeconds = null) {
     }
     return true;
   } catch (e) {
-    console.error(`❌ Redis SET failed for key ${key}:`, e.message);
+    console.error(`❌ Redis SET failed: ${key}`);
     return false;
   }
 }
 
-// ==================== TỰ ĐỘNG TÓM TẮT HỘI THOẠI DÀI ====================
 async function summarizeHistory(history) {
   if (history.length < 20) return history;
   
   try {
-    console.log('📝 Summarizing old conversation...');
     const oldMessages = history.slice(0, -10);
     const recentMessages = history.slice(-10);
     
     const summary = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: 'Tóm tắt cuộc hội thoại sau thành 3-4 điểm chính. Giữ nguyên thông tin quan trọng.' },
+        { role: 'system', content: 'Tóm tắt 3-4 điểm chính.' },
         { role: 'user', content: JSON.stringify(oldMessages) }
       ],
       model: MODELS.memory,
@@ -586,14 +660,11 @@ async function summarizeHistory(history) {
       max_tokens: 300
     });
     
-    const summaryText = summary.choices[0]?.message?.content || '';
-    
     return [
-      { role: 'system', content: `📋 Tóm tắt cuộc trò chuyện trước:\n${summaryText}` },
+      { role: 'system', content: `📋 Tóm tắt: ${summary.choices[0]?.message?.content}` },
       ...recentMessages
     ];
   } catch (e) {
-    console.warn('⚠️ History summarization failed:', e.message);
     return history.slice(-15);
   }
 }
@@ -605,14 +676,25 @@ export default async function handler(req, res) {
   }
   
   try {
-    const { message, userId = 'default', conversationId = 'default' } = req.body;
+    const { message, userId = 'default', conversationId = 'default', image = null } = req.body;
     
     if (!message || typeof message !== 'string') {
-      return res.status(400).json({ error: 'Message is required and must be a string' });
+      return res.status(400).json({ error: 'Message required' });
     }
     
     if (message.length > 3000) {
-      return res.status(400).json({ error: 'Message too long (max 3000 characters)' });
+      return res.status(400).json({ error: 'Message too long (max 3000)' });
+    }
+
+    // ✅ Validate image if present
+    if (image) {
+      if (typeof image !== 'string') {
+        return res.status(400).json({ error: 'Image must be base64 string' });
+      }
+      // Check size (max 4MB base64 ≈ 3MB original)
+      if (image.length > 5500000) {
+        return res.status(400).json({ error: 'Image too large (max 4MB)' });
+      }
     }
 
     const chatKey = `chat:${userId}:${conversationId}`;
@@ -629,8 +711,8 @@ export default async function handler(req, res) {
     // ==================== COMMANDS ====================
     if (lowerMsg === '/memory') {
       const memText = Object.keys(userMemory).length
-        ? '💾 **Thông tin đã lưu về bạn:**\n\n' + Object.entries(userMemory).map(([k,v]) => `• **${k}**: ${v}`).join('\n')
-        : '💭 Tôi chưa có thông tin nào về bạn.';
+        ? '💾 **Thông tin:**\n\n' + Object.entries(userMemory).map(([k,v]) => `• **${k}**: ${v}`).join('\n')
+        : '💭 Chưa có thông tin.';
       return res.status(200).json({ 
         success: true, 
         message: memText,
@@ -643,7 +725,7 @@ export default async function handler(req, res) {
         await redis.del(memoryKey);
         return res.status(200).json({ 
           success: true, 
-          message: '🗑️ Đã xóa toàn bộ thông tin về bạn. Bắt đầu lại từ đầu!' 
+          message: '🗑️ Đã xóa toàn bộ.' 
         });
       } else {
         const keyToDelete = message.substring(8).trim();
@@ -652,12 +734,12 @@ export default async function handler(req, res) {
           await safeRedisSet(memoryKey, userMemory);
           return res.status(200).json({ 
             success: true, 
-            message: `🗑️ Đã xóa thông tin: **${keyToDelete}**` 
+            message: `🗑️ Đã xóa: **${keyToDelete}**` 
           });
         } else {
           return res.status(200).json({ 
             success: true, 
-            message: `❓ Không tìm thấy thông tin về: **${keyToDelete}**` 
+            message: `❓ Không tìm thấy: **${keyToDelete}**` 
           });
         }
       }
@@ -667,7 +749,7 @@ export default async function handler(req, res) {
       await redis.del(chatKey);
       return res.status(200).json({ 
         success: true, 
-        message: '🗑️ Đã xóa lịch sử hội thoại. Bắt đầu cuộc trò chuyện mới!' 
+        message: '🗑️ Đã xóa lịch sử.' 
       });
     }
 
@@ -676,75 +758,115 @@ export default async function handler(req, res) {
         success: true,
         message: `🤖 **KAMI - AI Commands**
 
-📋 **Lệnh quản lý:**
-• \`/memory\` - Xem thông tin đã lưu về bạn
-• \`/forget [key]\` - Xóa thông tin cụ thể hoặc toàn bộ
-• \`/clear\` - Xóa lịch sử hội thoại
-• \`/help\` - Hiện danh sách lệnh
+📋 **Lệnh:**
+• \`/memory\` - Xem thông tin đã lưu
+• \`/forget [key]\` - Xóa thông tin
+• \`/clear\` - Xóa lịch sử
+• \`/help\` - Danh sách lệnh
 
-✨ **Tính năng thông minh:**
-• 🔍 Tự động tìm kiếm web khi cần info mới nhất
-• 🧠 Deep thinking cho câu hỏi phức tạp
-• 💾 Nhớ thông tin cá nhân của bạn
-• 🎯 Tự động nhận diện intent để trả lời tốt hơn
-• 📊 Tóm tắt kết quả search để tiết kiệm tokens
+✨ **Tính năng:**
+• 🔍 Tự động search web
+• 🧠 Deep thinking
+• 💾 Nhớ thông tin user
+• 🎨 **Phân tích & chỉnh sửa ảnh** (NEW!)
+• 📸 OCR - đọc chữ trong ảnh
 
-Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
+🎨 **Sử dụng ảnh:**
+Gửi ảnh kèm text:
+• "Phân tích ảnh này"
+• "Đọc chữ trong ảnh"
+• "Làm sao để ảnh đẹp hơn?"
+• "Chỉnh sửa độ sáng, màu sắc"`
       });
     }
 
     // ==================== PHÂN TÍCH INTENT ====================
-    const intent = await analyzeIntent(message, conversationHistory);
-    console.log('🎯 Intent detected:', intent);
+    const hasImage = !!image;
+    const intent = await analyzeIntent(message, conversationHistory, hasImage);
+    console.log('🎯 Intent:', intent);
 
     conversationHistory.push({ role: 'user', content: message });
     
-    // Tự động tóm tắt nếu quá dài
     if (conversationHistory.length > 30) {
       conversationHistory = await summarizeHistory(conversationHistory);
     }
 
-    // ==================== WEB SEARCH LOGIC (ĐÂY LÀ MẢNH GHÉP QUAN TRỌNG) ====================
-    let searchResults = null;
-    let usedSearch = false;
-    let searchKeywords = null;
+    // ==================== 🎨 IMAGE PROCESSING ====================
+    let imageAnalysis = null;
+    let imageProcessed = false;
     
-    if (await needsWebSearch(message, intent)) {
-      console.log('🔍 Triggering web search...');
-      
-      // BƯỚC 1: Extract keywords
-      searchKeywords = await extractSearchKeywords(message);
-      
-      // BƯỚC 2: Search với keywords đã optimize
-      const rawSearchResults = await searchWeb(searchKeywords);
-      
-      // BƯỚC 3: Summarize nếu kết quả quá dài
-      if (rawSearchResults) {
-        searchResults = await summarizeSearchResults(rawSearchResults, message);
-        usedSearch = true;
-        console.log(`✅ Search completed: ${searchResults.length} chars`);
-      } else {
-        console.log('⚠️ Search returned no results');
+    if (hasImage) {
+      try {
+        console.log(`🎨 Processing image with intent: ${intent.type}`);
+        
+        if (intent.type === 'ocr') {
+          // OCR - Extract text
+          imageAnalysis = await extractTextFromImage(image);
+          imageProcessed = true;
+          console.log('✅ OCR completed');
+          
+        } else if (intent.type === 'image_edit') {
+          // Edit suggestions
+          imageAnalysis = await suggestImageEdits(image, message);
+          imageProcessed = true;
+          console.log('✅ Edit suggestions generated');
+          
+        } else {
+          // Default: Image analysis
+          imageAnalysis = await analyzeImage(image, message.length > 20 ? message : null);
+          imageProcessed = true;
+          console.log('✅ Image analyzed');
+        }
+        
+      } catch (e) {
+        console.error('❌ Image processing error:', e.message);
+        imageAnalysis = `⚠️ Lỗi xử lý ảnh: ${e.message}`;
       }
     }
 
-    // ==================== DEEP THINKING CHO CÂU HỎI PHỨC TẠP ====================
+    // ==================== WEB SEARCH (chỉ khi KHÔNG có ảnh) ====================
+    let searchResults = null;
+    let usedSearch = false;
+    let searchKeywords = null;
+    let searchStatus = 'not_needed';
+    
+    if (!hasImage && await needsWebSearch(message, intent)) {
+      console.log('🔍 Web search...');
+      
+      searchKeywords = await extractSearchKeywords(message);
+      const rawSearchResults = await searchWeb(searchKeywords);
+      
+      if (rawSearchResults === 'SEARCH_IN_PROGRESS') {
+        searchStatus = 'in_progress';
+      } else if (rawSearchResults) {
+        searchResults = await summarizeSearchResults(rawSearchResults, message);
+        usedSearch = true;
+        searchStatus = 'success';
+        console.log(`✅ Search: ${searchResults.length} chars`);
+      } else {
+        searchStatus = 'failed';
+      }
+    }
+
+    // ==================== DEEP THINKING ====================
     let deepThought = null;
     if (intent.needsDeepThinking && intent.complexity === 'complex') {
       deepThought = await deepThinking(message, { memory: userMemory, history: conversationHistory });
     }
 
-    // ==================== BUILD SYSTEM PROMPT (MERGE SEARCH RESULTS) ====================
-    const systemPrompt = buildSystemPrompt(userMemory, searchResults, intent, deepThought);
+    // ==================== BUILD SYSTEM PROMPT ====================
+    const systemPrompt = buildSystemPrompt(userMemory, searchResults, intent, deepThought, imageAnalysis);
 
-    // ==================== ĐIỀU CHỈNH TEMPERATURE THEO INTENT ====================
+    // ==================== TEMPERATURE ====================
     let temperature = 0.7;
     if (intent.type === 'creative') temperature = 0.9;
     if (intent.type === 'technical') temperature = 0.5;
     if (intent.type === 'calculation') temperature = 0.3;
-    if (intent.type === 'search') temperature = 0.4; // Thấp cho độ chính xác cao
+    if (intent.type === 'search') temperature = 0.4;
+    if (intent.type === 'image_analysis' || intent.type === 'image_edit') temperature = 0.6;
+    if (intent.type === 'ocr') temperature = 0.2;
 
-    // ==================== GỌI GROQ VỚI CONTEXT ĐẦY ĐỦ ====================
+    // ==================== CALL GROQ ====================
     const chatCompletion = await callGroqWithRetry({
       messages: [
         { role: 'system', content: systemPrompt }, 
@@ -757,14 +879,21 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
       stream: false
     });
 
-    let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
+    let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, không thể tạo phản hồi.';
+
+    // Search disclaimers
+    if (searchStatus === 'failed' && intent.needsSearch) {
+      assistantMessage += '\n\n_⚠️ Không thể tìm kiếm, câu trả lời dựa trên kiến thức có sẵn._';
+    } else if (searchStatus === 'in_progress') {
+      assistantMessage += '\n\n_⏳ Search đang bận, dùng kiến thức có sẵn._';
+    }
 
     // ==================== MEMORY EXTRACTION ====================
     let memoryUpdated = false;
     const shouldExtractMemory = /tôi|mình|em|anh|chị|họ|gia đình|sống|làm|học|thích|ghét|yêu|muốn|là|tên/i.test(message);
     
     if (shouldExtractMemory && message.length > 10) {
-      console.log('🧠 Extracting memory...');
+      console.log('🧠 Memory extraction...');
       const memoryExtraction = await extractMemory(message, userMemory);
       
       if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
@@ -772,18 +901,16 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
         await safeRedisSet(memoryKey, userMemory);
         memoryUpdated = true;
         
-        const summary = memoryExtraction.summary || 'Đã lưu thông tin về bạn';
+        const summary = memoryExtraction.summary || 'Đã lưu';
         assistantMessage += `\n\n💾 _${summary}_`;
-        console.log('✅ Memory updated:', memoryExtraction.updates);
+        console.log('✅ Memory updated');
       }
     }
 
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
+    await safeRedisSet(chatKey, conversationHistory, 2592000);
 
-    // ==================== LƯU VÀO REDIS ====================
-    await safeRedisSet(chatKey, conversationHistory, 2592000); // 30 days
-
-    // ==================== METADATA PHONG PHÚ ====================
+    // ==================== RESPONSE METADATA ====================
     const metadata = {
       success: true,
       message: assistantMessage,
@@ -792,12 +919,25 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
       historyLength: conversationHistory.length,
       memoryUpdated,
       memoryCount: Object.keys(userMemory).length,
+      
+      // Search metadata
       usedWebSearch: usedSearch,
+      searchStatus,
       searchKeywords: usedSearch ? searchKeywords : null,
+      
+      // Image metadata
+      hasImage,
+      imageProcessed,
+      imageIntent: hasImage ? intent.type : null,
+      
+      // Intent metadata
       intent: intent.type,
       complexity: intent.complexity,
       usedDeepThinking: !!deepThought,
+      
+      // Model metadata
       model: MODELS.main,
+      visionModel: hasImage ? MODELS.vision : null,
       temperature,
       timestamp: new Date().toISOString()
     };
@@ -811,7 +951,7 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
     let statusCode = 500;
     
     if (error.message?.includes('rate_limit')) {
-      errMsg = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau 1 phút.';
+      errMsg = '⚠️ Tất cả API keys vượt giới hạn. Thử lại sau 1 phút.';
       statusCode = 429;
     } else if (error.message?.includes('Request quá lớn')) {
       statusCode = 413;
