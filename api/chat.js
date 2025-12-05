@@ -21,7 +21,7 @@ const MODELS = {
   main: 'llama-3.3-70b-versatile',
   search: 'llama-3.1-8b-instant',
   memory: 'llama-3.1-8b-instant',
-  smart: 'llama-3.3-70b-versatile', // Model cho suy luận phức tạp
+  smart: 'llama-3.3-70b-versatile',
 };
 
 if (API_KEYS.length === 0) throw new Error('❌ Không tìm thấy GROQ_API_KEY!');
@@ -42,18 +42,40 @@ const SEARCH_APIS = [
     apiKey: process.env.SERPER_API_KEY,
     enabled: !!process.env.SERPER_API_KEY,
     async search(query) {
-      const resp = await fetch('https://google.serper.dev/search', {
-        method: 'POST',
-        headers: { 'X-API-KEY': this.apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q: query, gl: 'vn', hl: 'vi', num: 8 })
-      });
-      if (!resp.ok) return null;
-      const data = await resp.json();
-      let results = '';
-      if (data.knowledgeGraph) results += `${data.knowledgeGraph.title || ''}\n${data.knowledgeGraph.description || ''}\n\n`;
-      if (data.answerBox?.answer) results += `${data.answerBox.answer}\n\n`;
-      if (data.organic?.length) data.organic.slice(0, 5).forEach(item => results += `${item.title}\n${item.snippet || ''}\n\n`);
-      return results.trim() || null;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      
+      try {
+        const resp = await fetch('https://google.serper.dev/search', {
+          method: 'POST',
+          headers: { 'X-API-KEY': this.apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ q: query, gl: 'vn', hl: 'vi', num: 8 }),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timer);
+        if (!resp.ok) return null;
+        
+        const data = await resp.json();
+        let results = '';
+        
+        if (data.knowledgeGraph) {
+          results += `${data.knowledgeGraph.title || ''}\n${data.knowledgeGraph.description || ''}\n\n`;
+        }
+        if (data.answerBox?.answer) {
+          results += `${data.answerBox.answer}\n\n`;
+        }
+        if (data.organic?.length) {
+          data.organic.slice(0, 5).forEach(item => {
+            results += `📌 ${item.title}\n${item.snippet || ''}\n\n`;
+          });
+        }
+        
+        return results.trim() || null;
+      } catch (e) {
+        clearTimeout(timer);
+        throw e;
+      }
     }
   },
   {
@@ -61,25 +83,41 @@ const SEARCH_APIS = [
     apiKey: process.env.TAVILY_API_KEY,
     enabled: !!process.env.TAVILY_API_KEY,
     async search(query) {
-      const resp = await fetch('https://api.tavily.com/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          api_key: this.apiKey,
-          query,
-          search_depth: 'advanced',
-          include_answer: true,
-          max_results: 8
-        })
-      });
-      if (!resp.ok) return null;
-      const data = await resp.json();
-      let results = '';
-      if (data.answer) results += `${data.answer}\n\n`;
-      if (data.results?.length) data.results.slice(0, 5).forEach(item =>
-        results += `${item.title}\n${item.content ? item.content.substring(0, 200) : ''}...\n\n`
-      );
-      return results.trim() || null;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      
+      try {
+        const resp = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: this.apiKey,
+            query,
+            search_depth: 'advanced',
+            include_answer: true,
+            max_results: 8
+          }),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timer);
+        if (!resp.ok) return null;
+        
+        const data = await resp.json();
+        let results = '';
+        
+        if (data.answer) results += `💡 ${data.answer}\n\n`;
+        if (data.results?.length) {
+          data.results.slice(0, 5).forEach(item =>
+            results += `📌 ${item.title}\n${item.content ? item.content.substring(0, 200) : ''}...\n\n`
+          );
+        }
+        
+        return results.trim() || null;
+      } catch (e) {
+        clearTimeout(timer);
+        throw e;
+      }
     }
   }
 ].filter(api => api.enabled);
@@ -89,46 +127,117 @@ console.log(`🔍 Load ${SEARCH_APIS.length} Search APIs: ${SEARCH_APIS.map(a =>
 let lastSearchApiIndex = -1;
 const inFlightSearches = {};
 
+// ==================== EXTRACT SEARCH KEYWORDS ====================
+async function extractSearchKeywords(message) {
+  try {
+    const response = await callGroqWithRetry({
+      messages: [
+        { 
+          role: 'system', 
+          content: 'Trích xuất 3-5 từ khóa chính để search Google. CHỈ TRẢ TỪ KHÓA, KHÔNG GIẢI THÍCH. Ví dụ: "giá vàng hôm nay", "thời tiết Hà Nội", "tỷ giá USD VND"' 
+        },
+        { role: 'user', content: `Câu hỏi: "${message}"\n\nTừ khóa search:` }
+      ],
+      model: MODELS.search,
+      temperature: 0.1,
+      max_tokens: 50
+    });
+    
+    const keywords = response.choices[0]?.message?.content?.trim() || message;
+    console.log(`🔑 Extracted keywords: "${keywords}"`);
+    return keywords;
+  } catch (e) {
+    console.warn('⚠️ Keyword extraction failed, using original message');
+    return message;
+  }
+}
+
+// ==================== SUMMARIZE SEARCH RESULTS ====================
+async function summarizeSearchResults(results, question) {
+  if (!results || results.length < 100) return results;
+  
+  try {
+    const response = await callGroqWithRetry({
+      messages: [
+        { 
+          role: 'system', 
+          content: 'Tóm tắt kết quả tìm kiếm thành 4-5 điểm chính, giữ nguyên số liệu và nguồn quan trọng. Dùng bullet points.' 
+        },
+        { 
+          role: 'user', 
+          content: `Câu hỏi: ${question}\n\n=== KẾT QUẢ TÌM KIẾM ===\n${results.substring(0, 2000)}` 
+        }
+      ],
+      model: MODELS.search,
+      temperature: 0.3,
+      max_tokens: 500
+    });
+    
+    const summary = response.choices[0]?.message?.content || results;
+    console.log('✅ Search results summarized');
+    return summary;
+  } catch (e) {
+    console.warn('⚠️ Summarization failed, using truncated results');
+    return results.substring(0, 1500);
+  }
+}
+
+// ==================== SEARCH WEB (IMPROVED) ====================
 async function searchWeb(query) {
-  if (!SEARCH_APIS.length) return null;
-
-  const cacheKey = `search:${query}`;
-
-  if (inFlightSearches[query]) {
-    console.log(`⚠️ Query đang chạy, bỏ qua: ${query}`);
+  if (!SEARCH_APIS.length) {
+    console.warn('⚠️ No search APIs available');
     return null;
   }
-  inFlightSearches[query] = true;
+
+  // Chuẩn hóa query để tránh cache duplicate
+  const cleanedQuery = query.trim().toLowerCase();
+  const cacheKey = `search:${cleanedQuery}`;
+
+  // Chống spam query
+  if (inFlightSearches[cleanedQuery]) {
+    console.log(`⚠️ Query đang chạy, bỏ qua: ${cleanedQuery}`);
+    return null;
+  }
+  inFlightSearches[cleanedQuery] = true;
 
   try {
+    // Check cache trước
     let cached = null;
     try { 
       cached = await redis.get(cacheKey);
-      if (cached && typeof cached === 'string') {
-        cached = JSON.parse(cached);
+      if (cached) {
+        if (typeof cached === 'string') {
+          try { cached = JSON.parse(cached); } catch {}
+        }
+        console.log('✅ Cache hit:', cleanedQuery);
+        return cached;
       }
     } catch(e) { 
       console.warn('⚠️ Redis get cache failed:', e.message); 
     }
-    if (cached) {
-      console.log('✅ Cache hit:', query);
-      return cached;
-    }
 
+    // Thử từng API
     for (let i = 0; i < SEARCH_APIS.length; i++) {
       lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
       const api = SEARCH_APIS[lastSearchApiIndex];
+      
       try {
-        console.log(`   🔎 Trying ${api.name}...`);
-        const result = await api.search(query);
-        if (result) {
+        console.log(`🔎 Trying ${api.name}...`);
+        const result = await api.search(cleanedQuery);
+        
+        // Validate quality
+        if (result && result.length >= 50) {
+          // Cache result
           try { 
-            await redis.setex(cacheKey, 1800, JSON.stringify(result)); 
+            await redis.set(cacheKey, JSON.stringify(result), { ex: 1800 }); // Modern syntax
           } catch(e) { 
-            console.warn('⚠️ Redis setex failed:', e.message); 
+            console.warn('⚠️ Redis set failed:', e.message); 
           }
-          console.log(`✅ ${api.name} success`);
+          
+          console.log(`✅ ${api.name} success (${result.length} chars)`);
           return result;
+        } else {
+          console.warn(`⚠️ ${api.name} returned insufficient data, trying next...`);
         }
       } catch (e) {
         console.warn(`❌ ${api.name} error: ${e.message}`);
@@ -136,22 +245,23 @@ async function searchWeb(query) {
       }
     }
 
-    console.warn('⚠️ All search APIs failed');
+    console.warn('⚠️ All search APIs failed or returned insufficient data');
     return null;
 
   } finally {
-    setTimeout(() => { delete inFlightSearches[query]; }, 3000);
+    setTimeout(() => { delete inFlightSearches[cleanedQuery]; }, 3000);
   }
 }
 
 // ==================== PHÂN TÍCH Ý ĐỊNH ====================
 async function analyzeIntent(message, history) {
   const triggers = {
-    search: /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm|tra|search|năm (19|20)\d{2}|mới nhất|gần đây|tin tức|thời tiết|giá|tỷ giá/i,
+    search: /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm|tra|search|năm (19|20)\d{2}|mới nhất|gần đây|tin tức|thời tiết|giá|tỷ giá|cập nhật|xu hướng/i,
     creative: /viết|kể|sáng tác|làm thơ|bài hát|câu chuyện|truyện|story/i,
     technical: /code|lập trình|debug|fix|algorithm|function|class|git|api|database/i,
     calculation: /tính|calculate|\d+\s*[\+\-\*\/\=\^]\s*\d+|phương trình|toán|bao nhiêu\s+\d/i,
-    explanation: /giải thích|tại sao|vì sao|làm sao|như thế nào|why|how|explain/i,
+    explanation: /giải thích|tại sao|vì sao|làm sao|như thế nào|why|how|explain|thế nào là/i,
+    comparison: /so sánh|khác nhau|tốt hơn|nên chọn|đâu là|hay hơn/i,
   };
 
   let intent = {
@@ -165,6 +275,9 @@ async function analyzeIntent(message, history) {
   if (triggers.search.test(message)) {
     intent.type = 'search';
     intent.needsSearch = true;
+  } else if (triggers.comparison.test(message)) {
+    intent.type = 'comparison';
+    intent.needsSearch = true; // So sánh thường cần data mới
   } else if (triggers.creative.test(message)) {
     intent.type = 'creative';
     intent.complexity = 'medium';
@@ -198,36 +311,48 @@ async function analyzeIntent(message, history) {
 
 // ==================== CẦN SEARCH THÔNG MINH ====================
 async function needsWebSearch(message, intent) {
-  // Nếu đã phát hiện từ intent
+  // Ưu tiên intent
   if (intent.needsSearch) return true;
 
   const triggers = [
     /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm lại|xem lại|tìm đi|sắp tới|năm nào|đang diễn ra/i,
     /năm (19|20)\d{2}/i,
-    /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)/i,
-    /giá|tỷ giá|bao nhiêu tiền|chi phí|price/i,
-    /tin tức|sự kiện|cập nhật|thông tin|news/i,
+    /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)|tháng (này|trước)/i,
+    /giá|tỷ giá|bao nhiêu tiền|chi phí|price|cost/i,
+    /tin tức|sự kiện|cập nhật|thông tin|news|update/i,
     /ai là|ai đã|là ai|người nào|who is/i,
     /khi nào|lúc nào|bao giờ|thời gian|when/i,
     /ở đâu|chỗ nào|tại đâu|địa điểm|where/i,
-    /thời tiết|nhiệt độ|khí hậu|weather/i,
-    /tỷ số|kết quả|đội|trận đấu|score/i,
+    /thời tiết|nhiệt độ|khí hậu|weather|temperature/i,
+    /tỷ số|kết quả|đội|trận đấu|score|match/i,
+    /thế nào là|như thế nào về|cập nhật về|xu hướng|thay đổi/i,
+    /so sánh|khác nhau|tốt hơn|nên chọn|đâu là/i,
+    /\d+\s*(năm|tháng|tuần|ngày)\s*(trước|sau|tới|nữa)/i, // Thời gian tương đối
   ];
   
   if (triggers.some(r => r.test(message))) return true;
 
-  // Tăng độ chính xác với LLM
+  // LLM validation cho câu hỏi ngắn
   if (message.includes('?') && message.length < 150) {
     try {
       const response = await callGroqWithRetry({
         messages: [
-          { role: 'system', content: `Phân tích câu hỏi có CẦN TÌM KIẾM THÔNG TIN MỚI NHẤT trên web không? Trả "YES" nếu cần dữ liệu thời gian thực (tin tức, giá cả, thời tiết, sự kiện...). Trả "NO" nếu là câu hỏi về kiến thức chung, lý thuyết, lịch sử đã biết.` },
+          { 
+            role: 'system', 
+            content: `Phân tích câu hỏi có CẦN TÌM KIẾM THÔNG TIN MỚI NHẤT trên web không?
+            
+Trả "YES" nếu cần dữ liệu thời gian thực: tin tức, giá cả, thời tiết, sự kiện hiện tại, xu hướng mới, so sánh sản phẩm/công nghệ mới.
+Trả "NO" nếu là câu hỏi về kiến thức chung, lý thuyết, lịch sử đã biết, định nghĩa, cách làm cơ bản.
+
+CHỈ TRẢ YES HOẶC NO.` 
+          },
           { role: 'user', content: message }
         ],
         model: MODELS.search,
         temperature: 0.1,
         max_tokens: 10
       });
+      
       const ans = response.choices[0]?.message?.content?.trim().toUpperCase();
       return ans.includes('YES');
     } catch (e) {
@@ -388,6 +513,8 @@ function buildSystemPrompt(memory, searchResults = null, intent = null, deepThou
       prompt += '\n🎨 Chế độ sáng tạo: Tập trung vào tính sinh động, cảm xúc, chi tiết miêu tả.';
     } else if (intent.type === 'explanation') {
       prompt += '\n📚 Chế độ giải thích: Phân tích từng bước, dùng ví dụ dễ hiểu, so sánh tương đồng.';
+    } else if (intent.type === 'comparison') {
+      prompt += '\n⚖️ Chế độ so sánh: Phân tích ưu/nhược điểm, đưa ra bảng so sánh nếu có thể.';
     }
   }
 
@@ -398,7 +525,7 @@ function buildSystemPrompt(memory, searchResults = null, intent = null, deepThou
 
   // Thêm search results
   if (searchResults) {
-    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM CẬP NHẬT:\n${searchResults}\n\n⚠️ Ưu tiên dùng dữ liệu mới nhất này. Trích dẫn nguồn khi sử dụng.`;
+    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM CẬP NHẬT:\n${searchResults}\n\n⚠️ QUAN TRỌNG: Ưu tiên dùng dữ liệu mới nhất này. Trích dẫn nguồn khi sử dụng (nếu có link/tên nguồn).`;
   }
   
   // Thêm memory
@@ -429,7 +556,7 @@ async function safeRedisSet(key, value, expirySeconds = null) {
   try {
     const stringified = typeof value === 'string' ? value : JSON.stringify(value);
     if (expirySeconds) {
-      await redis.setex(key, expirySeconds, stringified);
+      await redis.set(key, stringified, { ex: expirySeconds });
     } else {
       await redis.set(key, stringified);
     }
@@ -499,14 +626,14 @@ export default async function handler(req, res) {
 
     const lowerMsg = message.toLowerCase().trim();
 
-    // Commands
+    // ==================== COMMANDS ====================
     if (lowerMsg === '/memory') {
       const memText = Object.keys(userMemory).length
         ? '💾 **Thông tin đã lưu về bạn:**\n\n' + Object.entries(userMemory).map(([k,v]) => `• **${k}**: ${v}`).join('\n')
         : '💭 Tôi chưa có thông tin nào về bạn.';
       return res.status(200).json({ 
         success: true, 
-        message: memText, 
+        message: memText,
         memoryCount: Object.keys(userMemory).length 
       });
     }
@@ -560,12 +687,13 @@ export default async function handler(req, res) {
 • 🧠 Deep thinking cho câu hỏi phức tạp
 • 💾 Nhớ thông tin cá nhân của bạn
 • 🎯 Tự động nhận diện intent để trả lời tốt hơn
+• 📊 Tóm tắt kết quả search để tiết kiệm tokens
 
 Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
       });
     }
 
-    // Phân tích intent
+    // ==================== PHÂN TÍCH INTENT ====================
     const intent = await analyzeIntent(message, conversationHistory);
     console.log('🎯 Intent detected:', intent);
 
@@ -576,32 +704,47 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
       conversationHistory = await summarizeHistory(conversationHistory);
     }
 
-    // Web search nếu cần
+    // ==================== WEB SEARCH LOGIC (ĐÂY LÀ MẢNH GHÉP QUAN TRỌNG) ====================
     let searchResults = null;
     let usedSearch = false;
+    let searchKeywords = null;
     
     if (await needsWebSearch(message, intent)) {
       console.log('🔍 Triggering web search...');
-      searchResults = await searchWeb(message);
-      usedSearch = !!searchResults;
-      if (searchResults) console.log('✅ Search results retrieved');
+      
+      // BƯỚC 1: Extract keywords
+      searchKeywords = await extractSearchKeywords(message);
+      
+      // BƯỚC 2: Search với keywords đã optimize
+      const rawSearchResults = await searchWeb(searchKeywords);
+      
+      // BƯỚC 3: Summarize nếu kết quả quá dài
+      if (rawSearchResults) {
+        searchResults = await summarizeSearchResults(rawSearchResults, message);
+        usedSearch = true;
+        console.log(`✅ Search completed: ${searchResults.length} chars`);
+      } else {
+        console.log('⚠️ Search returned no results');
+      }
     }
 
-    // Deep thinking cho câu hỏi phức tạp
+    // ==================== DEEP THINKING CHO CÂU HỎI PHỨC TẠP ====================
     let deepThought = null;
     if (intent.needsDeepThinking && intent.complexity === 'complex') {
       deepThought = await deepThinking(message, { memory: userMemory, history: conversationHistory });
     }
 
-    // Build system prompt thông minh
+    // ==================== BUILD SYSTEM PROMPT (MERGE SEARCH RESULTS) ====================
     const systemPrompt = buildSystemPrompt(userMemory, searchResults, intent, deepThought);
 
-    // Điều chỉnh temperature theo intent
+    // ==================== ĐIỀU CHỈNH TEMPERATURE THEO INTENT ====================
     let temperature = 0.7;
     if (intent.type === 'creative') temperature = 0.9;
     if (intent.type === 'technical') temperature = 0.5;
     if (intent.type === 'calculation') temperature = 0.3;
+    if (intent.type === 'search') temperature = 0.4; // Thấp cho độ chính xác cao
 
+    // ==================== GỌI GROQ VỚI CONTEXT ĐẦY ĐỦ ====================
     const chatCompletion = await callGroqWithRetry({
       messages: [
         { role: 'system', content: systemPrompt }, 
@@ -616,7 +759,7 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
 
-    // Memory extraction
+    // ==================== MEMORY EXTRACTION ====================
     let memoryUpdated = false;
     const shouldExtractMemory = /tôi|mình|em|anh|chị|họ|gia đình|sống|làm|học|thích|ghét|yêu|muốn|là|tên/i.test(message);
     
@@ -637,9 +780,10 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
 
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
 
-    await safeRedisSet(chatKey, conversationHistory, 2592000);
+    // ==================== LƯU VÀO REDIS ====================
+    await safeRedisSet(chatKey, conversationHistory, 2592000); // 30 days
 
-    // Metadata phong phú
+    // ==================== METADATA PHONG PHÚ ====================
     const metadata = {
       success: true,
       message: assistantMessage,
@@ -649,6 +793,7 @@ Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
       memoryUpdated,
       memoryCount: Object.keys(userMemory).length,
       usedWebSearch: usedSearch,
+      searchKeywords: usedSearch ? searchKeywords : null,
       intent: intent.type,
       complexity: intent.complexity,
       usedDeepThinking: !!deepThought,
