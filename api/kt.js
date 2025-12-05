@@ -1,68 +1,118 @@
 import Groq from "groq-sdk";
 
-export async function GET() {
-  const result = {
-    timestamp: Date.now(),
-    groq: [],
-    serper: null,
-    tavily: null
-  };
+const GROQ_KEYS = (process.env.GROQ_API_KEYS || "")
+  .split(",")
+  .map(x => x.trim())
+  .filter(Boolean);
 
-  const API_KEYS = (process.env.GROQ_API_KEYS || "").split(",").map(k => k.trim());
-  const serperKey = process.env.SERPER_API_KEY;
-  const tavilyKey = process.env.TAVILY_API_KEY;
+const SERPER_KEY = process.env.SERPER_API_KEY;
+const TAVILY_KEY = process.env.TAVILY_API_KEY;
 
-  // ==== CHECK GROQ KEYS ====
-  for (let i = 0; i < API_KEYS.length; i++) {
-    const key = API_KEYS[i];
-    try {
-      const client = new Groq({ apiKey: key });
-      await client.models.list(); // cực nhẹ
-      result.groq.push({ keyIndex: i, status: "OK" });
-    } catch (e) {
-      result.groq.push({
-        keyIndex: i,
-        status: "ERROR",
-        error: e.message.substring(0, 120)
-      });
-    }
+const TIMEOUT = 8000;
+
+function timeoutPromise(ms) {
+  return new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("timeout")), ms)
+  );
+}
+
+async function checkGroqKey(apiKey, index) {
+  const client = new Groq({ apiKey });
+
+  try {
+    const r = await Promise.race([
+      client.models.list(),
+      timeoutPromise(TIMEOUT)
+    ]);
+
+    return {
+      keyIndex: index,
+      status: "OK",
+      models: r?.data?.length || 0
+    };
+  } catch (e) {
+    let err = e.message || "unknown";
+
+    if (err.includes("quota")) err = "quota_exceeded";
+    if (err.includes("401")) err = "unauthorized";
+    if (err.includes("timeout")) err = "timeout";
+
+    return {
+      keyIndex: index,
+      status: "ERROR",
+      error: err
+    };
   }
+}
 
-  // ==== CHECK SERPER ====
-  if (serperKey) {
-    try {
-      const resp = await fetch("https://google.serper.dev/search", {
+async function checkSerper() {
+  if (!SERPER_KEY) return "NO_KEY";
+
+  try {
+    const r = await Promise.race([
+      fetch("https://google.serper.dev/search", {
         method: "POST",
         headers: {
-          "X-API-KEY": serperKey,
+          "X-API-KEY": SERPER_KEY,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ q: "test" })
-      });
-      result.serper = resp.ok ? "OK" : `ERROR: ${resp.status}`;
-    } catch (e) {
-      result.serper = `ERROR: ${e.message}`;
-    }
-  }
+        body: JSON.stringify({ q: "ping" })
+      }),
+      timeoutPromise(TIMEOUT)
+    ]);
 
-  // ==== CHECK TAVILY ====
-  if (tavilyKey) {
-    try {
-      const resp = await fetch("https://api.tavily.com/search", {
+    return r.ok ? "OK" : `ERROR_${r.status}`;
+  } catch (e) {
+    return `ERROR_${e.message.substring(0, 50)}`;
+  }
+}
+
+async function checkTavily() {
+  if (!TAVILY_KEY) return "NO_KEY";
+
+  try {
+    const r = await Promise.race([
+      fetch("https://api.tavily.com/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          api_key: tavilyKey,
-          query: "test"
+          api_key: TAVILY_KEY,
+          query: "ping"
         })
-      });
-      result.tavily = resp.ok ? "OK" : `ERROR: ${resp.status}`;
-    } catch (e) {
-      result.tavily = `ERROR: ${e.message}`;
-    }
+      }),
+      timeoutPromise(TIMEOUT)
+    ]);
+
+    return r.ok ? "OK" : `ERROR_${r.status}`;
+  } catch (e) {
+    return `ERROR_${e.message.substring(0, 50)}`;
+  }
+}
+
+export async function GET() {
+  const groqStatus = [];
+
+  for (let i = 0; i < GROQ_KEYS.length; i++) {
+    const key = GROQ_KEYS[i];
+    groqStatus.push(await checkGroqKey(key, i));
   }
 
-  return new Response(JSON.stringify(result, null, 2), {
-    headers: { "Content-Type": "application/json" }
-  });
+  const serperStatus = await checkSerper();
+  const tavilyStatus = await checkTavily();
+
+  return new Response(
+    JSON.stringify(
+      {
+        timestamp: Date.now(),
+        groq: groqStatus,
+        serper: serperStatus,
+        tavily: tavilyStatus
+      },
+      null,
+      2
+    ),
+    {
+      headers: { "Content-Type": "application/json" }
+    }
+  );
 }
