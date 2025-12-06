@@ -18,7 +18,7 @@ const API_KEYS = [
 const MODELS = {
   main: 'llama-3.3-70b-versatile',
   search: 'llama-3.1-8b-instant',
-  memory: 'llama-3.1-8b-instant',
+  memory: 'llama-3.3-70b-versatile',
   smart: 'llama-3.3-70b-versatile',
 };
 
