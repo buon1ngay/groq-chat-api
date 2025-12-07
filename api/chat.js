@@ -147,9 +147,139 @@ function sanitizeKey(key) {
   return key.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 100);
 }
 
+// Helper: Normalize memory keys để tránh duplicate
+function normalizeMemoryKeys(updates) {
+  const normalized = {};
+  
+  // Mapping các key variations về chuẩn (lowercase, không dấu)
+  const keyMapping = {
+    'tên': 'tên',
+    'Tên': 'tên',
+    'name': 'tên',
+    
+    'tuổi': 'tuổi',
+    'Tuổi': 'tuổi',
+    'age': 'tuổi',
+    
+    'nghề': 'nghề nghiệp',
+    'Nghề': 'nghề nghiệp',
+    'nghề nghiệp': 'nghề nghiệp',
+    'Nghề nghiệp': 'nghề nghiệp',
+    'job': 'nghề nghiệp',
+    
+    'sở thích': 'sở thích',
+    'Sở thích': 'sở thích',
+    'hobby': 'sở thích',
+    'hobbies': 'sở thích',
+    
+    'ngôn ngữ lập trình yêu thích': 'ngôn ngữ lập trình',
+    'Ngôn ngữ lập trình yêu thích': 'ngôn ngữ lập trình',
+    'ngôn ngữ lập trình': 'ngôn ngữ lập trình',
+    'Ngôn ngữ lập trình': 'ngôn ngữ lập trình',
+    
+    'ngôn ngữ ưa thích': 'ngôn ngữ ưa thích',
+    'Ngôn ngữ ưa thích': 'ngôn ngữ ưa thích',
+    
+    'mối quan hệ': 'mối quan hệ',
+    'Mối quan hệ': 'mối quan hệ',
+    'relationship': 'mối quan hệ',
+    
+    'sinh nhật': 'sinh nhật',
+    'Sinh nhật': 'sinh nhật',
+    'birthday': 'sinh nhật',
+    'ngày sinh': 'sinh nhật',
+    
+    'địa chỉ': 'địa chỉ',
+    'Địa chỉ': 'địa chỉ',
+    'thành phố': 'địa chỉ',
+    'Thành phố': 'địa chỉ',
+    
+    'email': 'email',
+    'Email': 'email',
+    
+    'số điện thoại': 'số điện thoại',
+    'Số điện thoại': 'số điện thoại',
+    'phone': 'số điện thoại',
+  };
+  
+  for (const [key, value] of Object.entries(updates)) {
+    // Skip null/undefined
+    if (!value) continue;
+    
+    // Skip values không rõ ràng
+    const valueStr = String(value).toLowerCase();
+    if (valueStr.includes('không rõ') ||
+        valueStr.includes('không biết') ||
+        valueStr.includes('chưa có') ||
+        valueStr.includes('chưa rõ') ||
+        valueStr === 'none' ||
+        valueStr === 'n/a') {
+      console.log(`⚠️ Skipping unclear value: ${key}: ${value}`);
+      continue;
+    }
+    
+    // Normalize key
+    const normalizedKey = keyMapping[key] || key.toLowerCase().trim();
+    
+    // Nếu key đã tồn tại, merge values (cho sở thích)
+    if (normalized[normalizedKey] && normalizedKey === 'sở thích') {
+      // Merge sở thích
+      const existing = normalized[normalizedKey];
+      if (!existing.includes(value)) {
+        normalized[normalizedKey] = `${existing}, ${value}`;
+      }
+    } else {
+      normalized[normalizedKey] = value;
+    }
+  }
+  
+  return normalized;
+}
+
+// Helper: Cleanup memory - remove duplicates and unclear values
+function cleanupMemory(memory) {
+  const cleaned = {};
+  const seen = new Set();
+  
+  for (const [key, value] of Object.entries(memory)) {
+    const normalizedKey = key.toLowerCase().trim();
+    
+    // Skip duplicates
+    if (seen.has(normalizedKey)) {
+      console.log(`⚠️ Duplicate key detected, skipping: ${key}`);
+      continue;
+    }
+    
+    // Skip null/undefined
+    if (!value) continue;
+    
+    // Skip unclear values
+    const valueStr = String(value).toLowerCase();
+    if (valueStr.includes('không rõ') ||
+        valueStr.includes('không biết') ||
+        valueStr.includes('chưa có') ||
+        valueStr.includes('chưa rõ') ||
+        valueStr === 'none' ||
+        valueStr === 'n/a') {
+      console.log(`⚠️ Unclear value, skipping: ${key}: ${value}`);
+      continue;
+    }
+    
+    seen.add(normalizedKey);
+    cleaned[normalizedKey] = value;
+  }
+  
+  return cleaned;
+}
+
 // NEW: Detect memory management actions
 function detectMemoryAction(message) {
   const lower = message.toLowerCase().trim();
+  
+  // CLEANUP MEMORY - Dọn dẹp duplicate
+  if (lower.match(/dọn dẹp|cleanup|sắp xếp|tối ưu.*memory|gọn gàng/i)) {
+    return { action: 'cleanup_memory' };
+  }
   
   // EXPLICIT MEMORY SAVE - User yêu cầu nhớ cụ thể
   if (lower.match(/nhớ (rằng|là|giúp|hộ|cái này)|ghi nhớ|lưu lại|hãy nhớ|đừng quên|save|remember/i)) {
@@ -170,13 +300,12 @@ function detectMemoryAction(message) {
   const deletePatterns = [
     { pattern: /quên|xóa|bỏ.*tuổi/i, key: 'tuổi' },
     { pattern: /quên|xóa|bỏ.*tên/i, key: 'tên' },
-    { pattern: /quên|xóa|bỏ.*nghề/i, key: 'nghề' },
-    { pattern: /quên|xóa|bỏ.*nghề nghiệp/i, key: 'nghề nghiệp' },
+    { pattern: /quên|xóa|bỏ.*nghề/i, key: 'nghề nghiệp' },
     { pattern: /quên|xóa|bỏ.*sở thích/i, key: 'sở thích' },
     { pattern: /quên|xóa|bỏ.*địa chỉ/i, key: 'địa chỉ' },
-    { pattern: /quên|xóa|bỏ.*thành phố/i, key: 'thành phố' },
     { pattern: /quên|xóa|bỏ.*email/i, key: 'email' },
     { pattern: /quên|xóa|bỏ.*số điện thoại/i, key: 'số điện thoại' },
+    { pattern: /quên|xóa|bỏ.*sinh nhật/i, key: 'sinh nhật' },
   ];
   
   for (const { pattern, key } of deletePatterns) {
@@ -442,27 +571,30 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
 
 async function extractMemory(message, currentMemory) {
   try {
-    const prompt = `Phân tích tin nhắn và trích xuất thông tin CÁ NHÂN của user (tên, tuổi, nghề nghiệp, sở thích, tính cách, mối quan hệ, mục tiêu, ngôn ngữ ưa thích...).
+    const prompt = `Phân tích tin nhắn và trích xuất thông tin CÁ NHÂN của user.
 
 TIN NHẮN: "${message}"
 
 THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
 
-Quy tắc:
-- Chỉ lưu thông tin CHẮC CHẮN và QUAN TRỌNG
-- Cập nhật nếu có thông tin mới chính xác hơn
-- Không lưu thông tin tạm thời (như "đang đói", "đang buồn")
+QUY TẮC BẮT BUỘC:
+1. CHỈ lưu thông tin CHẮC CHẮN và CỤ THỂ
+2. TUYỆT ĐỐI KHÔNG lưu giá trị: "không rõ", "không biết", "chưa có", "chưa rõ", "none", "N/A"
+3. Key PHẢI dùng các key chuẩn này: tên, tuổi, nghề nghiệp, sở thích, email, số điện thoại, địa chỉ, sinh nhật, mối quan hệ, ngôn ngữ lập trình
+4. Nếu THÔNG TIN ĐÃ BIẾT có key tương tự, PHẢI dùng ĐÚNG key đó
+5. Cập nhật nếu có thông tin mới CHÍNH XÁC hơn
+6. Nếu không có thông tin cụ thể, trả về hasNewInfo: false
 
-Trả về JSON:
+Trả về JSON (CHỈ JSON THUẦN, KHÔNG TEXT/MARKDOWN):
 {
   "hasNewInfo": true/false,
-  "updates": { "key": "giá trị cụ thể" },
+  "updates": { "key": "giá trị" },
   "summary": "Tóm tắt ngắn"
 }`;
 
     const response = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG TEXT KHÁC.' },
+        { role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG THÊM TEXT/MARKDOWN BẤT KỲ.' },
         { role: 'user', content: prompt }
       ],
       model: MODELS.memory,
@@ -634,6 +766,30 @@ export default async function handler(req, res) {
     if (memoryAction) {
       console.log(`🎯 Memory action detected: ${memoryAction.action}`);
       
+      // CLEANUP MEMORY - Dọn dẹp duplicate và unclear values
+      if (memoryAction.action === 'cleanup_memory') {
+        let memory = await safeRedisGet(memoryKey, {});
+        const originalCount = Object.keys(memory).length;
+        
+        memory = cleanupMemory(memory);
+        const cleanedCount = Object.keys(memory).length;
+        const removed = originalCount - cleanedCount;
+        
+        await safeRedisSet(memoryKey, memory);
+        
+        console.log(`✅ Cleaned up memory: ${originalCount} → ${cleanedCount} (removed ${removed})`);
+        
+        return res.status(200).json({
+          success: true,
+          message: `🧹 **Đã dọn dẹp memory!**\n\n📊 **Trước**: ${originalCount} thông tin\n✅ **Sau**: ${cleanedCount} thông tin\n🗑️ **Đã xóa**: ${removed} duplicate/unclear entries`,
+          memoryAction: 'cleanup_memory',
+          before: originalCount,
+          after: cleanedCount,
+          removed: removed,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       // EXPLICIT MEMORY SAVE - User yêu cầu lưu cụ thể
       if (memoryAction.action === 'save_memory_explicit') {
         let userMemory = await safeRedisGet(memoryKey, {});
@@ -642,11 +798,24 @@ export default async function handler(req, res) {
         const memoryExtraction = await extractMemory(message, userMemory);
         
         if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-          userMemory = { ...userMemory, ...memoryExtraction.updates };
+          // NORMALIZE keys trước khi merge
+          const normalizedUpdates = normalizeMemoryKeys(memoryExtraction.updates);
+          
+          if (Object.keys(normalizedUpdates).length === 0) {
+            return res.status(200).json({
+              success: true,
+              message: '💭 Thông tin không đủ rõ ràng để lưu. Bạn có thể nói cụ thể hơn không?\n\n_Ví dụ: "Nhớ rằng email của tôi là nam@gmail.com"_',
+              memoryAction: 'save_memory_explicit',
+              noValidInfo: true,
+              timestamp: new Date().toISOString()
+            });
+          }
+          
+          userMemory = { ...userMemory, ...normalizedUpdates };
           await safeRedisSet(memoryKey, userMemory);
           
           let response = '✅ **Đã ghi nhớ!**\n\n💾 **Thông tin vừa lưu:**\n';
-          for (const [key, value] of Object.entries(memoryExtraction.updates)) {
+          for (const [key, value] of Object.entries(normalizedUpdates)) {
             response += `• **${key}**: ${value}\n`;
           }
           
@@ -655,13 +824,13 @@ export default async function handler(req, res) {
             response += `\n_${summary}_`;
           }
           
-          console.log(`✅ Explicitly saved: ${JSON.stringify(memoryExtraction.updates)}`);
+          console.log(`✅ Explicitly saved: ${JSON.stringify(normalizedUpdates)}`);
           
           return res.status(200).json({
             success: true,
             message: response,
             memoryAction: 'save_memory_explicit',
-            updates: memoryExtraction.updates,
+            updates: normalizedUpdates,
             totalMemoryCount: Object.keys(userMemory).length,
             timestamp: new Date().toISOString()
           });
@@ -726,35 +895,63 @@ export default async function handler(req, res) {
         const keyToDelete = memoryAction.key;
         let memory = await safeRedisGet(memoryKey, {});
         
-        // Tìm key match (case-insensitive và flexible matching)
+        // Tìm exact match hoặc close match
         let actualKey = null;
+        
+        // Priority 1: Exact match (case-insensitive)
         for (const key of Object.keys(memory)) {
-          if (key.toLowerCase().includes(keyToDelete.toLowerCase()) || 
-              keyToDelete.toLowerCase().includes(key.toLowerCase())) {
+          if (key.toLowerCase() === keyToDelete.toLowerCase()) {
             actualKey = key;
             break;
           }
         }
         
+        // Priority 2: Key contains keyToDelete
+        if (!actualKey) {
+          for (const key of Object.keys(memory)) {
+            if (key.toLowerCase().includes(keyToDelete.toLowerCase())) {
+              actualKey = key;
+              break;
+            }
+          }
+        }
+        
+        // Priority 3: KeyToDelete contains key (less strict)
+        if (!actualKey) {
+          for (const key of Object.keys(memory)) {
+            if (keyToDelete.toLowerCase().includes(key.toLowerCase()) && key.length > 3) {
+              actualKey = key;
+              break;
+            }
+          }
+        }
+        
         if (actualKey) {
+          const deletedValue = memory[actualKey];
           delete memory[actualKey];
           await safeRedisSet(memoryKey, memory);
           console.log(`✅ Deleted memory key: ${actualKey}`);
           
           return res.status(200).json({
             success: true,
-            message: `🗑️ Đã xóa thông tin về **${actualKey}** của bạn.`,
+            message: `🗑️ Đã xóa thông tin về **${actualKey}** của bạn.\n\n_Giá trị đã xóa: ${deletedValue}_`,
             memoryAction: 'delete_memory_key',
             deletedKey: actualKey,
+            deletedValue: deletedValue,
             remainingCount: Object.keys(memory).length,
             timestamp: new Date().toISOString()
           });
         } else {
+          // Hiển thị các keys có sẵn để user biết
+          const availableKeys = Object.keys(memory).join(', ');
+          
           return res.status(200).json({
             success: true,
-            message: `💭 Tôi không có lưu thông tin về **${keyToDelete}** của bạn.`,
+            message: `💭 Tôi không có lưu thông tin về **${keyToDelete}** của bạn.\n\n📋 Các thông tin hiện có: ${availableKeys || '(trống)'}`,
             memoryAction: 'delete_memory_key',
             keyNotFound: true,
+            requestedKey: keyToDelete,
+            availableKeys: Object.keys(memory),
             timestamp: new Date().toISOString()
           });
         }
@@ -852,13 +1049,18 @@ export default async function handler(req, res) {
       const memoryExtraction = await extractMemory(message, userMemory);
       
       if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-        userMemory = { ...userMemory, ...memoryExtraction.updates };
-        await safeRedisSet(memoryKey, userMemory);
-        memoryUpdated = true;
+        // NORMALIZE keys trước khi merge
+        const normalizedUpdates = normalizeMemoryKeys(memoryExtraction.updates);
         
-        const summary = memoryExtraction.summary || 'Đã lưu thông tin về bạn';
-        assistantMessage += `\n\n💾 _${summary}_`;
-        console.log('✅ Memory updated:', memoryExtraction.updates);
+        if (Object.keys(normalizedUpdates).length > 0) {
+          userMemory = { ...userMemory, ...normalizedUpdates };
+          await safeRedisSet(memoryKey, userMemory);
+          memoryUpdated = true;
+          
+          const summary = memoryExtraction.summary || 'Đã lưu thông tin về bạn';
+          assistantMessage += `\n\n💾 _${summary}_`;
+          console.log('✅ Memory updated:', normalizedUpdates);
+        }
       }
     }
 
