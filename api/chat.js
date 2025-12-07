@@ -297,19 +297,23 @@ function detectMemoryAction(message) {
   }
   
   // Delete specific key - xóa từng field cụ thể
+  // FIX: Phải match CẢ keyword VÀ key name, không chỉ keyword
   const deletePatterns = [
-    { pattern: /quên|xóa|bỏ.*tuổi/i, key: 'tuổi' },
-    { pattern: /quên|xóa|bỏ.*tên/i, key: 'tên' },
-    { pattern: /quên|xóa|bỏ.*nghề/i, key: 'nghề nghiệp' },
-    { pattern: /quên|xóa|bỏ.*sở thích/i, key: 'sở thích' },
-    { pattern: /quên|xóa|bỏ.*địa chỉ/i, key: 'địa chỉ' },
-    { pattern: /quên|xóa|bỏ.*email/i, key: 'email' },
-    { pattern: /quên|xóa|bỏ.*số điện thoại/i, key: 'số điện thoại' },
-    { pattern: /quên|xóa|bỏ.*sinh nhật/i, key: 'sinh nhật' },
+    { pattern: /(quên|xóa|bỏ).*(tuổi)/i, key: 'tuổi' },
+    { pattern: /(quên|xóa|bỏ).*(tên)(?!\s*nghề)/i, key: 'tên' },  // Not followed by "nghề"
+    { pattern: /(quên|xóa|bỏ).*(nghề|job)/i, key: 'nghề nghiệp' },
+    { pattern: /(quên|xóa|bỏ).*(sở thích|hobby)/i, key: 'sở thích' },
+    { pattern: /(quên|xóa|bỏ).*(địa chỉ|thành phố|address)/i, key: 'địa chỉ' },
+    { pattern: /(quên|xóa|bỏ).*(email|mail)/i, key: 'email' },
+    { pattern: /(quên|xóa|bỏ).*(số điện thoại|phone|sđt)/i, key: 'số điện thoại' },
+    { pattern: /(quên|xóa|bỏ).*(sinh nhật|birthday|ngày sinh)/i, key: 'sinh nhật' },
+    { pattern: /(quên|xóa|bỏ).*(mối quan hệ|relationship)/i, key: 'mối quan hệ' },
+    { pattern: /(quên|xóa|bỏ).*(ngôn ngữ|language)/i, key: 'ngôn ngữ lập trình' },
   ];
   
   for (const { pattern, key } of deletePatterns) {
     if (pattern.test(lower)) {
+      console.log(`🎯 Matched delete pattern for key: ${key}`);
       return { action: 'delete_memory_key', key };
     }
   }
