@@ -147,6 +147,52 @@ function sanitizeKey(key) {
   return key.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 100);
 }
 
+// NEW: Detect memory management actions
+function detectMemoryAction(message) {
+  const lower = message.toLowerCase().trim();
+  
+  // EXPLICIT MEMORY SAVE - User yêu cầu nhớ cụ thể
+  if (lower.match(/nhớ (rằng|là|giúp|hộ|cái này)|ghi nhớ|lưu lại|hãy nhớ|đừng quên|save|remember/i)) {
+    return { action: 'save_memory_explicit', message };
+  }
+  
+  // View memory - nhiều cách hỏi
+  if (lower.match(/xem|hiện|cho (tôi|mình|tao) xem|bạn nhớ gì|thông tin (đã lưu|về (tôi|mình|tao))|memory|đã biết gì/i)) {
+    return { action: 'view_memory' };
+  }
+  
+  // Clear all memory - xóa toàn bộ
+  if (lower.match(/quên hết|xóa (tất cả|toàn bộ|hết) (thông tin|memory|info)|reset memory|xóa sạch|bắt đầu lại/i)) {
+    return { action: 'clear_memory' };
+  }
+  
+  // Delete specific key - xóa từng field cụ thể
+  const deletePatterns = [
+    { pattern: /quên|xóa|bỏ.*tuổi/i, key: 'tuổi' },
+    { pattern: /quên|xóa|bỏ.*tên/i, key: 'tên' },
+    { pattern: /quên|xóa|bỏ.*nghề/i, key: 'nghề' },
+    { pattern: /quên|xóa|bỏ.*nghề nghiệp/i, key: 'nghề nghiệp' },
+    { pattern: /quên|xóa|bỏ.*sở thích/i, key: 'sở thích' },
+    { pattern: /quên|xóa|bỏ.*địa chỉ/i, key: 'địa chỉ' },
+    { pattern: /quên|xóa|bỏ.*thành phố/i, key: 'thành phố' },
+    { pattern: /quên|xóa|bỏ.*email/i, key: 'email' },
+    { pattern: /quên|xóa|bỏ.*số điện thoại/i, key: 'số điện thoại' },
+  ];
+  
+  for (const { pattern, key } of deletePatterns) {
+    if (pattern.test(lower)) {
+      return { action: 'delete_memory_key', key };
+    }
+  }
+  
+  // Clear history - xóa lịch sử chat
+  if (lower.match(/xóa (lịch sử|chat|cuộc trò chuyện|tin nhắn)|clear (history|chat)/i)) {
+    return { action: 'clear_history' };
+  }
+  
+  return null; // Normal chat
+}
+
 async function extractSearchKeywords(message) {
   try {
     const response = await callGroqWithRetry({
@@ -209,7 +255,6 @@ async function searchWeb(query) {
   const cleanedQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanedQuery}`;
   
-  // Check if search is already in progress
   if (inFlightSearches.has(cleanedQuery)) {
     console.log(`⚠️ Query đang chạy, bỏ qua: ${cleanedQuery}`);
     return null;
@@ -218,7 +263,6 @@ async function searchWeb(query) {
   inFlightSearches.set(cleanedQuery, Date.now());
 
   try {
-    // Try cache first
     try { 
       const cached = await redis.get(cacheKey);
       if (cached) {
@@ -230,7 +274,6 @@ async function searchWeb(query) {
       console.warn('⚠️ Redis get cache failed:', e.message); 
     }
     
-    // Try each search API
     for (let i = 0; i < SEARCH_APIS.length; i++) {
       lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
       const api = SEARCH_APIS[lastSearchApiIndex];
@@ -240,7 +283,6 @@ async function searchWeb(query) {
         const result = await api.search(cleanedQuery);
         
         if (result && result.length >= 50) {
-          // Cache the result
           try { 
             await redis.set(cacheKey, JSON.stringify(result), { ex: 1800 });
           } catch(e) { 
@@ -262,7 +304,6 @@ async function searchWeb(query) {
     return null;
 
   } finally {
-    // Clean up in-flight tracker
     inFlightSearches.delete(cleanedQuery);
   }
 }
@@ -553,17 +594,14 @@ async function safeRedisSet(key, value, expirySeconds = null) {
   }
 }
 
-// Tối ưu: Dùng sliding window thay vì summarize tốn kém
 function optimizeHistory(history) {
   if (history.length <= 30) return history;
   
   console.log('📝 Optimizing conversation history with sliding window...');
   
-  // Giữ system message đầu tiên (nếu có)
   const systemMessages = history.filter(m => m.role === 'system');
   const conversationMessages = history.filter(m => m.role !== 'system');
   
-  // Giữ 25 messages gần nhất
   const recentMessages = conversationMessages.slice(-25);
   
   return [...systemMessages, ...recentMessages];
@@ -585,31 +623,182 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Message too long (max 3000 characters)' });
     }
 
-    // Sanitize keys để tránh injection
     const safeUserId = sanitizeKey(userId);
     const safeConversationId = sanitizeKey(conversationId);
     const chatKey = `chat:${safeUserId}:${safeConversationId}`;
     const memoryKey = `memory:${safeUserId}`;
 
+    // ============ DETECT MEMORY MANAGEMENT ACTIONS ============
+    const memoryAction = detectMemoryAction(message);
+    
+    if (memoryAction) {
+      console.log(`🎯 Memory action detected: ${memoryAction.action}`);
+      
+      // EXPLICIT MEMORY SAVE - User yêu cầu lưu cụ thể
+      if (memoryAction.action === 'save_memory_explicit') {
+        let userMemory = await safeRedisGet(memoryKey, {});
+        
+        console.log('💾 Explicit memory save requested');
+        const memoryExtraction = await extractMemory(message, userMemory);
+        
+        if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
+          userMemory = { ...userMemory, ...memoryExtraction.updates };
+          await safeRedisSet(memoryKey, userMemory);
+          
+          let response = '✅ **Đã ghi nhớ!**\n\n💾 **Thông tin vừa lưu:**\n';
+          for (const [key, value] of Object.entries(memoryExtraction.updates)) {
+            response += `• **${key}**: ${value}\n`;
+          }
+          
+          const summary = memoryExtraction.summary;
+          if (summary) {
+            response += `\n_${summary}_`;
+          }
+          
+          console.log(`✅ Explicitly saved: ${JSON.stringify(memoryExtraction.updates)}`);
+          
+          return res.status(200).json({
+            success: true,
+            message: response,
+            memoryAction: 'save_memory_explicit',
+            updates: memoryExtraction.updates,
+            totalMemoryCount: Object.keys(userMemory).length,
+            timestamp: new Date().toISOString()
+          });
+        } else {
+          return res.status(200).json({
+            success: true,
+            message: '💭 Tôi không tìm thấy thông tin cụ thể nào để lưu. Bạn có thể nói rõ hơn được không?\n\n_Ví dụ: "Nhớ rằng email của tôi là nam@gmail.com"_',
+            memoryAction: 'save_memory_explicit',
+            noInfoFound: true,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+      
+      // VIEW MEMORY
+      if (memoryAction.action === 'view_memory') {
+        const memory = await safeRedisGet(memoryKey, {});
+        
+        let response = '';
+        if (Object.keys(memory).length === 0) {
+          response = '💭 Tôi chưa có thông tin nào về bạn. Hãy chia sẻ để tôi nhớ bạn hơn nhé!';
+        } else {
+          response = '💾 **Thông tin tôi đã lưu về bạn:**\n\n';
+          for (const [key, value] of Object.entries(memory)) {
+            response += `• **${key}**: ${value}\n`;
+          }
+          response += `\n_Tổng cộng ${Object.keys(memory).length} thông tin_`;
+        }
+        
+        return res.status(200).json({
+          success: true,
+          message: response,
+          memoryAction: 'view_memory',
+          memoryCount: Object.keys(memory).length,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // CLEAR MEMORY
+      if (memoryAction.action === 'clear_memory') {
+        try {
+          await redis.del(memoryKey);
+          console.log(`✅ Cleared memory for user: ${safeUserId}`);
+          
+          return res.status(200).json({
+            success: true,
+            message: '🗑️ Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu làm quen lại từ đầu nhé!',
+            memoryAction: 'clear_memory',
+            timestamp: new Date().toISOString()
+          });
+        } catch (e) {
+          return res.status(500).json({
+            success: false,
+            error: 'Không thể xóa memory: ' + e.message,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+      
+      // DELETE SPECIFIC KEY
+      if (memoryAction.action === 'delete_memory_key') {
+        const keyToDelete = memoryAction.key;
+        let memory = await safeRedisGet(memoryKey, {});
+        
+        // Tìm key match (case-insensitive và flexible matching)
+        let actualKey = null;
+        for (const key of Object.keys(memory)) {
+          if (key.toLowerCase().includes(keyToDelete.toLowerCase()) || 
+              keyToDelete.toLowerCase().includes(key.toLowerCase())) {
+            actualKey = key;
+            break;
+          }
+        }
+        
+        if (actualKey) {
+          delete memory[actualKey];
+          await safeRedisSet(memoryKey, memory);
+          console.log(`✅ Deleted memory key: ${actualKey}`);
+          
+          return res.status(200).json({
+            success: true,
+            message: `🗑️ Đã xóa thông tin về **${actualKey}** của bạn.`,
+            memoryAction: 'delete_memory_key',
+            deletedKey: actualKey,
+            remainingCount: Object.keys(memory).length,
+            timestamp: new Date().toISOString()
+          });
+        } else {
+          return res.status(200).json({
+            success: true,
+            message: `💭 Tôi không có lưu thông tin về **${keyToDelete}** của bạn.`,
+            memoryAction: 'delete_memory_key',
+            keyNotFound: true,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+      
+      // CLEAR HISTORY
+      if (memoryAction.action === 'clear_history') {
+        try {
+          await redis.del(chatKey);
+          console.log(`✅ Cleared history for conversation: ${safeConversationId}`);
+          
+          return res.status(200).json({
+            success: true,
+            message: '🗑️ Đã xóa lịch sử hội thoại. Chúng ta bắt đầu cuộc trò chuyện mới nhé!',
+            memoryAction: 'clear_history',
+            timestamp: new Date().toISOString()
+          });
+        } catch (e) {
+          return res.status(500).json({
+            success: false,
+            error: 'Không thể xóa history: ' + e.message,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+    }
+
+    // ============ NORMAL CHAT FLOW ============
+    
     let conversationHistory = await safeRedisGet(chatKey, []);
     let userMemory = await safeRedisGet(memoryKey, {});
     
     if (!Array.isArray(conversationHistory)) conversationHistory = [];
     if (typeof userMemory !== 'object' || userMemory === null) userMemory = {};
     
-    // Analyze intent
     const intent = await analyzeIntent(message, conversationHistory);
     console.log('🎯 Intent detected:', intent);
 
-    // Add user message to history
     conversationHistory.push({ role: 'user', content: message });
     
-    // Optimize history if too long (using sliding window instead of expensive summarization)
     if (conversationHistory.length > 30) {
       conversationHistory = optimizeHistory(conversationHistory);
     }
     
-    // Web search if needed
     let searchResults = null;
     let usedSearch = false;
     let searchKeywords = null;
@@ -628,23 +817,19 @@ export default async function handler(req, res) {
       }
     }
     
-    // Deep thinking for complex queries
     let deepThought = null;
     if (intent.needsDeepThinking && intent.complexity === 'complex') {
       deepThought = await deepThinking(message, { memory: userMemory, history: conversationHistory });
     }
     
-    // Build system prompt with all context
     const systemPrompt = buildSystemPrompt(userMemory, searchResults, intent, deepThought);
     
-    // Adjust temperature based on intent type
     let temperature = 0.7;
     if (intent.type === 'creative') temperature = 0.9;
     if (intent.type === 'technical') temperature = 0.5;
     if (intent.type === 'calculation') temperature = 0.3;
     if (intent.type === 'search') temperature = 0.4;
     
-    // Generate response
     const chatCompletion = await callGroqWithRetry({
       messages: [
         { role: 'system', content: systemPrompt }, 
@@ -659,7 +844,6 @@ export default async function handler(req, res) {
     
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
     
-    // Extract and update memory if relevant
     let memoryUpdated = false;
     const shouldExtractMemory = /tôi|mình|em|anh|chị|họ|gia đình|sống|làm|học|thích|ghét|yêu|muốn|là|tên/i.test(message);
     
@@ -678,13 +862,10 @@ export default async function handler(req, res) {
       }
     }
 
-    // Save assistant response to history
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
     
-    // Save conversation history (30 days expiry)
     await safeRedisSet(chatKey, conversationHistory, 2592000);
     
-    // Return response with metadata
     const metadata = {
       success: true,
       message: assistantMessage,
