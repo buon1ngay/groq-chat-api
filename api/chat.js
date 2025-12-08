@@ -2,468 +2,38 @@ import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
 // ============================================
-// REDIS CONNECTION WITH RETRY & FALLBACK
+// CONFIGURATION - TẬP TRUNG TẤT CẢ CONFIG
 // ============================================
 
-if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
-  throw new Error('❌ Thiếu UPSTASH_REDIS_REST_URL hoặc UPSTASH_REDIS_REST_TOKEN!');
-}
-
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-  retry: {
-    retries: 3,
-    backoff: (retryCount) => Math.min(1000 * 2 ** retryCount, 8000)
-  }
-});
-
-// Redis health check với graceful degradation
-let redisHealthy = false;
-async function checkRedisHealth() {
-  try {
-    await redis.ping();
-    redisHealthy = true;
-    console.log('✅ Redis connected successfully');
-    return true;
-  } catch (e) {
-    redisHealthy = false;
-    console.error('❌ Redis connection failed:', e.message);
-    console.warn('⚠️ Running in DEGRADED MODE (no persistence)');
-    return false;
-  }
-}
-
-// Check on startup
-checkRedisHealth().catch(console.error);
-
-// Periodic health check every 5 minutes
-setInterval(() => checkRedisHealth(), 300000);
-
-// ============================================
-// IN-MEMORY FALLBACK CACHE
-// ============================================
-
-const memoryCache = {
-  conversations: new Map(), // userId:convId -> messages[]
-  memories: new Map(),      // userId -> memory object
-  maxSize: 100,             // Max conversations to keep in memory
-  
-  get(key) {
-    const [type, ...rest] = key.split(':');
-    const map = type === 'chat' ? this.conversations : this.memories;
-    return map.get(rest.join(':'));
+const CONFIG = {
+  models: {
+    main: 'llama-3.3-70b-versatile',
+    search: 'llama-3.1-8b-instant',
+    memory: 'llama-3.3-70b-versatile',
   },
-  
-  set(key, value) {
-    const [type, ...rest] = key.split(':');
-    const map = type === 'chat' ? this.conversations : this.memories;
-    
-    // LRU eviction
-    if (map.size >= this.maxSize) {
-      const firstKey = map.keys().next().value;
-      map.delete(firstKey);
-    }
-    
-    map.set(rest.join(':'), value);
+  redis: {
+    historyTTL: 2592000, // 30 days
+    memoryTTL: 7776000,  // 90 days
+    searchCacheTTL: 1800, // 30 minutes
+    maxHistoryLength: 50,
   },
-  
-  clear() {
-    this.conversations.clear();
-    this.memories.clear();
+  search: {
+    timeout: 10000,
+    maxResults: 8,
   }
 };
 
 // ============================================
-// IMPROVED REDIS OPERATIONS
+// REDIS SETUP
 // ============================================
 
-async function safeRedisGet(key, defaultValue = null) {
-  if (!redisHealthy) {
-    console.warn(`⚠️ Redis unhealthy, using memory cache for ${key}`);
-    return memoryCache.get(key) || defaultValue;
-  }
-  
-  try {
-    const data = await redis.get(key);
-    if (!data) return defaultValue;
-    
-    // Cache in memory for faster access
-    memoryCache.set(key, data);
-    
-    if (typeof data === 'object') return data;
-    try { return JSON.parse(data); } catch { return data; }
-  } catch (e) {
-    console.error(`❌ Redis GET failed for ${key}:`, e.message);
-    // Fallback to memory cache
-    return memoryCache.get(key) || defaultValue;
-  }
-}
-
-async function safeRedisSet(key, value, expirySeconds = null) {
-  // Always update memory cache first
-  memoryCache.set(key, value);
-  
-  if (!redisHealthy) {
-    console.warn(`⚠️ Redis unhealthy, data stored in memory only (will be lost on restart)`);
-    return true; // Return success to not break app flow
-  }
-  
-  try {
-    const stringified = typeof value === 'string' ? value : JSON.stringify(value);
-    if (expirySeconds) {
-      await redis.set(key, stringified, { ex: expirySeconds });
-    } else {
-      await redis.set(key, stringified);
-    }
-    return true;
-  } catch (e) {
-    console.error(`❌ Redis SET failed for ${key}:`, e.message);
-    // Data is still in memory cache
-    return false;
-  }
-}
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
 // ============================================
-// ATOMIC HISTORY OPERATIONS (Fix Race Condition)
-// ============================================
-
-async function appendToHistory(chatKey, userMsg, assistantMsg, maxLength = 30) {
-  const lockKey = `lock:${chatKey}`;
-  const lockValue = `${Date.now()}-${Math.random()}`;
-  const lockTTL = 10; // 10 seconds
-  
-  try {
-    // Try to acquire lock with retry
-    let lockAcquired = false;
-    for (let i = 0; i < 5; i++) {
-      const result = await redis.set(lockKey, lockValue, { 
-        nx: true, // Only set if not exists
-        ex: lockTTL 
-      });
-      
-      if (result === 'OK') {
-        lockAcquired = true;
-        break;
-      }
-      
-      // Wait 100-300ms before retry
-      await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
-    }
-    
-    if (!lockAcquired) {
-      console.warn(`⚠️ Could not acquire lock for ${chatKey}, proceeding without lock`);
-    }
-    
-    // Get current history
-    let history = await safeRedisGet(chatKey, []);
-    if (!Array.isArray(history)) history = [];
-    
-    // Validate and append new messages
-    history.push(
-      { role: 'user', content: userMsg, timestamp: Date.now() },
-      { role: 'assistant', content: assistantMsg, timestamp: Date.now() }
-    );
-    
-    // Trim if too long (keep only recent messages)
-    if (history.length > maxLength) {
-      // Keep system message if exists, plus recent messages
-      const systemMsgs = history.filter(m => m.role === 'system');
-      const otherMsgs = history.filter(m => m.role !== 'system');
-      history = [...systemMsgs, ...otherMsgs.slice(-maxLength)];
-    }
-    
-    // Save back
-    await safeRedisSet(chatKey, history, 2592000); // 30 days
-    
-    return history;
-    
-  } finally {
-    // Release lock if we acquired it
-    try {
-      const currentLock = await redis.get(lockKey);
-      if (currentLock === lockValue) {
-        await redis.del(lockKey);
-      }
-    } catch (e) {
-      console.warn('⚠️ Lock release failed:', e.message);
-    }
-  }
-}
-
-// ============================================
-// IMPROVED MEMORY MANAGEMENT WITH VERSIONING
-// ============================================
-
-// Normalize memory field names
-function normalizeMemoryKey(key) {
-  // Convert to lowercase and trim
-  let normalized = key.toLowerCase().trim();
-  
-  // Map common variations to standard fields
-  const keyMapping = {
-    'ten': 'tên',
-    'tên đầy đủ': 'tên',
-    'họ tên': 'tên',
-    'tuổi': 'tuổi',
-    'tuoi': 'tuổi',
-    'nghề': 'nghề nghiệp',
-    'nghe': 'nghề nghiệp',
-    'nghề nghiệp': 'nghề nghiệp',
-    'nghe nghiep': 'nghề nghiệp',
-    'công việc': 'nghề nghiệp',
-    'cong viec': 'nghề nghiệp',
-    'job': 'nghề nghiệp',
-    'nơi ở': 'địa điểm',
-    'noi o': 'địa điểm',
-    'địa chỉ': 'địa điểm',
-    'dia chi': 'địa điểm',
-    'sống ở': 'địa điểm',
-    'location': 'địa điểm',
-    'sở thích': 'sở thích',
-    'so thich': 'sở thích',
-    'thích': 'sở thích',
-    'hobby': 'sở thích',
-    'hobbies': 'sở thích',
-    'học vấn': 'học vấn',
-    'hoc van': 'học vấn',
-    'trường': 'học vấn',
-    'truong': 'học vấn',
-    'education': 'học vấn',
-    'mối quan hệ': 'mối quan hệ',
-    'quan hệ': 'mối quan hệ',
-    'gia đình': 'gia đình',
-    'gia dinh': 'gia đình',
-    'family': 'gia đình',
-    'mục tiêu': 'mục tiêu',
-    'muc tieu': 'mục tiêu',
-    'goal': 'mục tiêu',
-    'goals': 'mục tiêu'
-  };
-  
-  return keyMapping[normalized] || normalized;
-}
-
-async function updateMemory(memoryKey, updates) {
-  if (!updates || Object.keys(updates).length === 0) {
-    return null;
-  }
-  
-  try {
-    // Get current memory
-    const currentMemory = await safeRedisGet(memoryKey, {
-      data: {},
-      version: 0,
-      history: [],
-      updatedAt: Date.now()
-    });
-    
-    // Ensure structure
-    if (!currentMemory.data) currentMemory.data = {};
-    if (!currentMemory.history) currentMemory.history = [];
-    if (!currentMemory.version) currentMemory.version = 0;
-    
-    // Normalize existing keys in memory (one-time migration)
-    const normalizedData = {};
-    for (const [key, value] of Object.entries(currentMemory.data)) {
-      const normalizedKey = normalizeMemoryKey(key);
-      // If multiple keys normalize to same field, keep the most recent/longest value
-      if (!normalizedData[normalizedKey] || value.length > normalizedData[normalizedKey].length) {
-        normalizedData[normalizedKey] = value;
-      }
-    }
-    currentMemory.data = normalizedData;
-    
-    // Track changes with normalized keys
-    const changes = [];
-    for (const [key, newValue] of Object.entries(updates)) {
-      const normalizedKey = normalizeMemoryKey(key);
-      const oldValue = currentMemory.data[normalizedKey];
-      
-      // Skip if value hasn't actually changed
-      if (oldValue === newValue) continue;
-      
-      // For arrays/lists (like hobbies), merge instead of replace
-      if (normalizedKey === 'sở thích' && oldValue) {
-        const oldHobbies = oldValue.split(',').map(h => h.trim().toLowerCase());
-        const newHobbies = newValue.split(',').map(h => h.trim());
-        const mergedHobbies = [...new Set([...oldHobbies, ...newHobbies.map(h => h.toLowerCase())])];
-        const finalValue = mergedHobbies.map(h => 
-          h.charAt(0).toUpperCase() + h.slice(1)
-        ).join(', ');
-        
-        if (finalValue !== oldValue) {
-          changes.push({
-            field: normalizedKey,
-            oldValue,
-            newValue: finalValue,
-            timestamp: Date.now()
-          });
-          currentMemory.data[normalizedKey] = finalValue;
-        }
-        continue;
-      }
-      
-      changes.push({
-        field: normalizedKey,
-        oldValue,
-        newValue,
-        timestamp: Date.now()
-      });
-      currentMemory.data[normalizedKey] = newValue;
-    }
-    
-    if (changes.length === 0) {
-      return currentMemory;
-    }
-    
-    // Update metadata
-    currentMemory.version += 1;
-    currentMemory.updatedAt = Date.now();
-    
-    // Keep last 10 changes in history
-    currentMemory.history = [
-      ...currentMemory.history.slice(-9),
-      ...changes
-    ];
-    
-    // Save with 90 days TTL
-    await safeRedisSet(memoryKey, currentMemory, 7776000);
-    
-    console.log(`✅ Memory updated (v${currentMemory.version}): ${changes.length} changes`);
-    return currentMemory;
-    
-  } catch (e) {
-    console.error('❌ Memory update failed:', e.message);
-    return null;
-  }
-}
-
-// ============================================
-// SMART HISTORY SUMMARIZATION
-// ============================================
-
-async function smartSummarizeHistory(history, keepRecent = 10) {
-  if (history.length <= 20) return history;
-  
-  try {
-    console.log('📝 Smart summarization started...');
-    
-    const recentMessages = history.slice(-keepRecent);
-    const oldMessages = history.slice(0, -keepRecent);
-    
-    // Extract important info: code blocks, numbers, names, dates
-    const importantPatterns = [
-      /```[\s\S]*?```/g,  // Code blocks
-      /\d{1,2}\/\d{1,2}\/\d{2,4}/g,  // Dates
-      /\d+[.,]\d+/g,  // Numbers
-      /[A-Z][a-z]+(?:\s[A-Z][a-z]+)+/g,  // Proper names
-    ];
-    
-    let importantInfo = [];
-    oldMessages.forEach(msg => {
-      importantPatterns.forEach(pattern => {
-        const matches = msg.content.match(pattern);
-        if (matches) importantInfo.push(...matches);
-      });
-    });
-    
-    // Deduplicate
-    importantInfo = [...new Set(importantInfo)].slice(0, 20);
-    
-    // Create summary with LLM
-    const groq = createGroqClient();
-    const summary = await groq.chat.completions.create({
-      messages: [
-        { 
-          role: 'system', 
-          content: 'Tóm tắt cuộc hội thoại thành 4-5 điểm chính. Giữ nguyên: số liệu, code, tên riêng, ngày tháng.' 
-        },
-        { 
-          role: 'user', 
-          content: `${oldMessages.slice(0, 20).map(m => `${m.role}: ${m.content}`).join('\n\n')}\n\nThông tin quan trọng: ${importantInfo.join(', ')}` 
-        }
-      ],
-      model: MODELS.memory,
-      temperature: 0.2,
-      max_tokens: 400
-    });
-    
-    const summaryText = summary.choices[0]?.message?.content || '';
-    
-    return [
-      { 
-        role: 'system', 
-        content: `📋 Tóm tắt ${oldMessages.length} tin nhắn:\n${summaryText}\n\nDữ liệu quan trọng: ${importantInfo.slice(0, 10).join(', ')}`,
-        timestamp: Date.now(),
-        isSummary: true
-      },
-      ...recentMessages
-    ];
-    
-  } catch (e) {
-    console.warn('⚠️ Summarization failed:', e.message);
-    // Fallback: just keep recent messages
-    return history.slice(-15);
-  }
-}
-
-// ============================================
-// CLEANUP OLD CONVERSATIONS
-// ============================================
-
-async function cleanupOldConversations(userId) {
-  try {
-    // Get all chat keys for this user
-    const pattern = `chat:${userId}:*`;
-    const keys = await redis.keys(pattern);
-    
-    if (!keys || keys.length === 0) return;
-    
-    console.log(`🧹 Found ${keys.length} conversations for ${userId}`);
-    
-    // Get TTL for each key
-    const ttls = await Promise.all(
-      keys.map(async key => {
-        try {
-          const ttl = await redis.ttl(key);
-          return { key, ttl };
-        } catch {
-          return { key, ttl: -1 };
-        }
-      })
-    );
-    
-    // Delete expired or very old conversations
-    let deletedCount = 0;
-    for (const { key, ttl } of ttls) {
-      if (ttl === -1 || ttl > 2592000) { // No TTL or > 30 days
-        try {
-          await redis.del(key);
-          deletedCount++;
-        } catch (e) {
-          console.warn(`⚠️ Failed to delete ${key}:`, e.message);
-        }
-      }
-    }
-    
-    if (deletedCount > 0) {
-      console.log(`✅ Cleaned up ${deletedCount} old conversations`);
-    }
-    
-  } catch (e) {
-    console.error('❌ Cleanup failed:', e.message);
-  }
-}
-
-// Run cleanup every 6 hours
-setInterval(() => {
-  // Get list of active users from recent requests (implement based on your needs)
-  // For now, skip auto-cleanup
-}, 21600000);
-
-// ============================================
-// GROQ & SEARCH SETUP (unchanged)
+// GROQ API KEYS - ROUND ROBIN
 // ============================================
 
 const API_KEYS = [
@@ -475,320 +45,623 @@ const API_KEYS = [
   process.env.GROQ_API_KEY_6,
 ].filter(Boolean);
 
-const MODELS = {
-  main: 'llama-3.3-70b-versatile',
-  search: 'llama-3.1-8b-instant',
-  memory: 'llama-3.1-8b-instant',
-  smart: 'llama-3.3-70b-versatile',
-};
+if (API_KEYS.length === 0) {
+  throw new Error('❌ Không tìm thấy GROQ_API_KEY!');
+}
 
-if (API_KEYS.length === 0) throw new Error('❌ Không tìm thấy GROQ_API_KEY!');
+console.log(`🔑 Đã load ${API_KEYS.length} GROQ API keys`);
 
-let lastGroqKeyIndex = -1;
+let currentKeyIndex = -1;
+
 function createGroqClient() {
-  lastGroqKeyIndex = (lastGroqKeyIndex + 1) % API_KEYS.length;
-  return new Groq({ apiKey: API_KEYS[lastGroqKeyIndex] });
+  currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+  return new Groq({ apiKey: API_KEYS[currentKeyIndex] });
 }
 
 async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   let lastError;
+  
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const groq = createGroqClient();
       return await groq.chat.completions.create(config);
-    } catch (e) {
-      lastError = e;
+    } catch (error) {
+      lastError = error;
       
-      if (e.status === 413 || e.message?.includes('Request too large')) {
-        throw new Error('❌ Request quá lớn. Hãy rút ngắn tin nhắn.');
-      }
-      
-      if (e.status === 400) {
-        throw new Error('❌ Request không hợp lệ: ' + e.message);
-      }
-      
-      if (e.status === 429 || e.message?.includes('rate_limit')) {
-        console.warn(`⚠️ Rate limit key ${lastGroqKeyIndex}, trying next...`);
+      if (error.status === 429 || error.message?.includes('rate_limit')) {
+        console.warn(`⚠ Rate limit key ${currentKeyIndex}, thử key tiếp (${attempt + 1}/${maxRetries})`);
         continue;
       }
       
-      throw e;
+      if (error.status === 413 || error.message?.includes('Request too large')) {
+        throw new Error('❌ Request quá lớn. Hãy rút ngắn tin nhắn.');
+      }
+      
+      throw error;
     }
   }
-  throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError.message}`);
+  
+  throw new Error(`❌ Hết ${maxRetries} API keys: ${lastError.message}`);
 }
 
-// [Rest of your existing helper functions: extractSearchKeywords, summarizeSearchResults, 
-// searchWeb, analyzeIntent, needsWebSearch, extractMemory, deepThinking, buildSystemPrompt...]
-// Keep them as-is, they work fine
+// ============================================
+// SEARCH APIs - ROUND ROBIN
+// ============================================
+
+const SEARCH_APIS = [
+  {
+    name: 'Serper',
+    enabled: !!process.env.SERPER_API_KEY,
+    async search(query) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CONFIG.search.timeout);
+      
+      try {
+        const resp = await fetch('https://google.serper.dev/search', {
+          method: 'POST',
+          headers: {
+            'X-API-KEY': process.env.SERPER_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            q: query,
+            gl: 'vn',
+            hl: 'vi',
+            num: CONFIG.search.maxResults
+          }),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timer);
+        
+        if (!resp.ok) {
+          console.warn(`⚠ Serper returned ${resp.status}`);
+          return null;
+        }
+        
+        const data = await resp.json();
+        let results = '';
+        
+        if (data.knowledgeGraph) {
+          results += `${data.knowledgeGraph.title || ''}\n${data.knowledgeGraph.description || ''}\n\n`;
+        }
+        
+        if (data.answerBox?.answer) {
+          results += `💡 ${data.answerBox.answer}\n\n`;
+        }
+        
+        if (data.organic?.length) {
+          data.organic.slice(0, 5).forEach(item => {
+            results += `📌 ${item.title}\n${item.snippet || ''}\n\n`;
+          });
+        }
+        
+        return results.trim() || null;
+        
+      } catch (e) {
+        clearTimeout(timer);
+        if (e.name === 'AbortError') {
+          console.warn('⚠ Serper timeout');
+        } else {
+          console.warn('⚠ Serper error:', e.message);
+        }
+        return null;
+      }
+    }
+  },
+  {
+    name: 'Tavily',
+    enabled: !!process.env.TAVILY_API_KEY,
+    async search(query) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CONFIG.search.timeout);
+      
+      try {
+        const resp = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: process.env.TAVILY_API_KEY,
+            query,
+            search_depth: 'advanced',
+            include_answer: true,
+            max_results: CONFIG.search.maxResults
+          }),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timer);
+        
+        if (!resp.ok) {
+          console.warn(`⚠ Tavily returned ${resp.status}`);
+          return null;
+        }
+        
+        const data = await resp.json();
+        let results = '';
+        
+        if (data.answer) {
+          results += `💡 ${data.answer}\n\n`;
+        }
+        
+        if (data.results?.length) {
+          data.results.slice(0, 5).forEach(item => {
+            results += `📌 ${item.title}\n${item.content ? item.content.substring(0, 200) : ''}...\n\n`;
+          });
+        }
+        
+        return results.trim() || null;
+        
+      } catch (e) {
+        clearTimeout(timer);
+        if (e.name === 'AbortError') {
+          console.warn('⚠ Tavily timeout');
+        } else {
+          console.warn('⚠ Tavily error:', e.message);
+        }
+        return null;
+      }
+    }
+  }
+].filter(api => api.enabled);
+
+console.log(`🔍 Search APIs available: ${SEARCH_APIS.map(a => a.name).join(', ')}`);
+
+let currentSearchApiIndex = -1;
+
+async function searchWeb(query) {
+  if (SEARCH_APIS.length === 0) {
+    console.warn('⚠ No search APIs configured');
+    return null;
+  }
+  
+  const cleanQuery = query.trim().toLowerCase();
+  const cacheKey = `search:${cleanQuery}`;
+  
+  // Check cache
+  try {
+    let cached = await redis.get(cacheKey);
+    if (cached) {
+      if (typeof cached === 'string') {
+        try { cached = JSON.parse(cached); } catch {}
+      }
+      console.log('✅ Search cache hit');
+      return cached;
+    }
+  } catch (e) {
+    console.warn('⚠ Cache check failed:', e.message);
+  }
+  
+  // Try each API in round-robin
+  for (let i = 0; i < SEARCH_APIS.length; i++) {
+    currentSearchApiIndex = (currentSearchApiIndex + 1) % SEARCH_APIS.length;
+    const api = SEARCH_APIS[currentSearchApiIndex];
+    
+    try {
+      console.log(`🔎 Searching with ${api.name}...`);
+      const result = await api.search(cleanQuery);
+      
+      if (result && result.length >= 50) {
+        // Cache result
+        try {
+          await redis.setex(cacheKey, CONFIG.redis.searchCacheTTL, JSON.stringify(result));
+        } catch (e) {
+          console.warn('⚠ Failed to cache search result');
+        }
+        
+        console.log(`✅ ${api.name} success (${result.length} chars)`);
+        return result;
+      } else {
+        console.warn(`⚠ ${api.name} returned insufficient data`);
+      }
+    } catch (e) {
+      console.warn(`❌ ${api.name} failed:`, e.message);
+      continue;
+    }
+  }
+  
+  console.warn('❌ All search APIs failed');
+  return null;
+}
 
 // ============================================
-// IMPROVED MAIN HANDLER
+// INTENT ANALYSIS
+// ============================================
+
+function needsWebSearch(message) {
+  const searchTriggers = [
+    /hiện (tại|nay|giờ)|bây giờ|lúc này/i,
+    /năm (19|20)\d{2}/i,
+    /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)/i,
+    /giá|tỷ giá|bao nhiêu tiền|chi phí/i,
+    /tin tức|sự kiện|cập nhật|thông tin|news/i,
+    /thời tiết|nhiệt độ|khí hậu/i,
+    /tìm|tra|search|tìm kiếm/i,
+    /ai là|ai đã|là ai/i,
+    /khi nào|lúc nào|bao giờ/i,
+    /ở đâu|chỗ nào|tại đâu/i,
+  ];
+  
+  return searchTriggers.some(trigger => trigger.test(message));
+}
+
+async function extractSearchKeywords(message) {
+  try {
+    const response = await callGroqWithRetry({
+      messages: [
+        {
+          role: 'system',
+          content: 'Trích xuất 5-10 từ khóa chính để tìm kiếm Google. CHỈ TRẢ TỪ KHÓA, KHÔNG GIẢI THÍCH.'
+        },
+        {
+          role: 'user',
+          content: `Câu hỏi: "${message}"\n\nTừ khóa tìm kiếm:`
+        }
+      ],
+      model: CONFIG.models.search,
+      temperature: 0.1,
+      max_tokens: 50
+    });
+    
+    const keywords = response.choices[0]?.message?.content?.trim() || message;
+    console.log(`🔑 Search keywords: "${keywords}"`);
+    return keywords;
+  } catch (e) {
+    console.warn('⚠ Keyword extraction failed, using original message');
+    return message;
+  }
+}
+
+// ============================================
+// MEMORY FUNCTIONS
+// ============================================
+
+function normalizeMemoryKey(key) {
+  const normalized = key.toLowerCase().trim();
+  
+  const keyMapping = {
+    'ten': 'Tên',
+    'tên': 'Tên',
+    'tên đầy đủ': 'Tên',
+    'họ tên': 'Tên',
+    'tuổi': 'Tuổi',
+    'tuoi': 'Tuổi',
+    'nghề': 'Nghề nghiệp',
+    'nghe': 'Nghề nghiệp',
+    'nghề nghiệp': 'Nghề nghiệp',
+    'nghe nghiep': 'Nghề nghiệp',
+    'công việc': 'Nghề nghiệp',
+    'cong viec': 'Nghề nghiệp',
+    'job': 'Nghề nghiệp',
+    'nơi ở': 'Địa điểm',
+    'noi o': 'Địa điểm',
+    'địa chỉ': 'Địa điểm',
+    'dia chi': 'Địa điểm',
+    'sống ở': 'Địa điểm',
+    'location': 'Địa điểm',
+    'sở thích': 'Sở thích',
+    'so thich': 'Sở thích',
+    'thích': 'Sở thích',
+    'hobby': 'Sở thích',
+    'hobbies': 'Sở thích',
+    'học vấn': 'Học vấn',
+    'hoc van': 'Học vấn',
+    'trường': 'Học vấn',
+    'truong': 'Học vấn',
+    'education': 'Học vấn',
+    'gia đình': 'Gia đình',
+    'gia dinh': 'Gia đình',
+    'family': 'Gia đình',
+    'mục tiêu': 'Mục tiêu',
+    'muc tieu': 'Mục tiêu',
+    'goal': 'Mục tiêu',
+  };
+  
+  return keyMapping[normalized] || key;
+}
+
+async function extractMemory(message, currentMemory) {
+  try {
+    const extractionPrompt = `Phân tích tin nhắn và trích xuất THÔNG TIN CÁ NHÂN QUAN TRỌNG cần lưu lâu dài.
+
+TIN NHẮN: "${message}"
+
+THÔNG TIN ĐÃ LƯU: ${JSON.stringify(currentMemory, null, 2)}
+
+THÔNG TIN CẦN LƯU:
+- Tên, biệt danh
+- Nghề nghiệp, công việc
+- Sở thích, đam mê
+- Gia đình (vợ/chồng, con, sinh nhật...)
+- Địa điểm sống
+- Mục tiêu, dự định
+- Học vấn
+- Sức khỏe quan trọng
+- Bất kỳ thông tin USER YÊU CẦU BẠN NHỚ
+
+QUY TẮC:
+- CHỈ lưu thông tin QUAN TRỌNG, lâu dài
+- KHÔNG lưu câu hỏi thông thường, yêu cầu tìm kiếm
+- Dùng key chuẩn: "Tên", "Tuổi", "Nghề nghiệp", "Sở thích", "Địa điểm", "Gia đình", "Học vấn", "Mục tiêu"
+- Nếu không có info mới, trả về hasNewInfo: false
+
+TRẢ VỀ JSON:
+{
+  "hasNewInfo": true/false,
+  "updates": {
+    "Tên": "giá trị",
+    "Tuổi": "giá trị"
+  },
+  "summary": "Tóm tắt ngắn"
+}
+
+CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
+
+    const response = await callGroqWithRetry({
+      messages: [
+        {
+          role: 'system',
+          content: 'Bạn là trợ lý phân tích thông tin. CHỈ TRẢ JSON, không markdown hay text khác.'
+        },
+        {
+          role: 'user',
+          content: extractionPrompt
+        }
+      ],
+      model: CONFIG.models.memory,
+      temperature: 0.3,
+      max_tokens: 500
+    });
+
+    const content = response.choices[0]?.message?.content || '{}';
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      
+      // Normalize keys
+      if (parsed.updates) {
+        const normalizedUpdates = {};
+        for (const [key, value] of Object.entries(parsed.updates)) {
+          const normalizedKey = normalizeMemoryKey(key);
+          normalizedUpdates[normalizedKey] = value;
+        }
+        parsed.updates = normalizedUpdates;
+      }
+      
+      console.log('📊 Memory extraction:', parsed);
+      return parsed;
+    }
+    
+    return { hasNewInfo: false };
+    
+  } catch (error) {
+    console.error('❌ Error extracting memory:', error);
+    return { hasNewInfo: false };
+  }
+}
+
+// ============================================
+// SYSTEM PROMPT BUILDER
+// ============================================
+
+function buildSystemPrompt(memory, searchResults = null) {
+  let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
+
+NGUYÊN TẮC:
+– Mặc định dùng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác
+– Xưng "tôi" hoặc theo yêu cầu. Gọi user theo tiền tố họ chọn
+– Luôn phân tích trước khi trả lời. Giọng chuyên nghiệp, bình tĩnh, rõ ràng
+– Tùy biến theo ngữ cảnh. Ưu tiên tuyệt đối theo mục đích câu hỏi
+– Dùng emoji tiết chế. Tránh format quá mức trừ khi được yêu cầu
+– Khi user chia sẻ thông tin cá nhân, ghi nhớ TỰ NHIÊN, chỉ nói "Được rồi", "Ok mình nhớ" nhẹ nhàng`;
+
+  if (searchResults) {
+    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠️ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
+  }
+
+  if (Object.keys(memory).length > 0) {
+    prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
+    
+    for (const [key, value] of Object.entries(memory)) {
+      prompt += `- ${key}: ${value}\n`;
+    }
+    
+    prompt += '\n⚠️ QUY TẮC:\n';
+    prompt += '- Sử dụng thông tin này TỰ NHIÊN trong cuộc trò chuyện\n';
+    prompt += '- ĐỪNG nhắc đi nhắc lại trừ khi được hỏi\n';
+    prompt += '- Thể hiện bạn NHỚ người dùng qua cách xưng hô, cách nói phù hợp\n';
+  }
+  
+  return prompt;
+}
+
+// ============================================
+// MAIN HANDLER
 // ============================================
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
-  
+
   try {
     const { message, userId = 'default', conversationId = 'default' } = req.body;
-    
+
     if (!message || typeof message !== 'string') {
-      return res.status(400).json({ error: 'Message is required and must be a string' });
+      return res.status(400).json({ error: 'Message is required' });
     }
-    
+
     if (message.length > 3000) {
-      return res.status(400).json({ error: 'Message too long (max 3000 characters)' });
+      return res.status(400).json({ error: 'Message too long (max 3000 chars)' });
     }
-    
+
+    console.log(`📨 [${userId}] ${message}`);
+
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
-    
-    // Get history and memory in parallel
-    const [historyData, memoryData] = await Promise.all([
-      safeRedisGet(chatKey, []),
-      safeRedisGet(memoryKey, { data: {}, version: 0, history: [], updatedAt: Date.now() })
-    ]);
-    
-    let conversationHistory = Array.isArray(historyData) ? historyData : [];
-    let userMemory = memoryData.data || {};
-    
-    // Validate history structure
-    conversationHistory = conversationHistory.filter(msg => 
-      msg && 
-      typeof msg === 'object' && 
-      msg.role && 
-      msg.content && 
-      ['user', 'assistant', 'system'].includes(msg.role)
-    );
-    
-    // Analyze intent
-    const intent = await analyzeIntent(message, conversationHistory);
-    console.log('🎯 Intent:', intent.type, '| Complexity:', intent.complexity);
-    
-    // Smart summarization if history is too long
-    if (conversationHistory.length > 20) {
-      conversationHistory = await smartSummarizeHistory(conversationHistory, 12);
+
+    // Load history and memory
+    let conversationHistory = await redis.get(chatKey) || [];
+    if (typeof conversationHistory === 'string') {
+      conversationHistory = JSON.parse(conversationHistory);
     }
-    
-    // Web search if needed
-    let searchResults = null;
-    let usedSearch = false;
-    let searchKeywords = null;
-    
-    if (await needsWebSearch(message, intent)) {
-      console.log('🔍 Web search triggered...');
-      searchKeywords = await extractSearchKeywords(message);
-      const rawResults = await searchWeb(searchKeywords);
-      if (rawResults) {
-        searchResults = await summarizeSearchResults(rawResults, message);
-        usedSearch = true;
-        console.log(`✅ Search completed`);
-      }
+
+    let userMemory = await redis.get(memoryKey) || {};
+    if (typeof userMemory === 'string') {
+      userMemory = JSON.parse(userMemory);
     }
-    
-    // Deep thinking for complex queries
-    let deepThought = null;
-    if (intent.needsDeepThinking && intent.complexity === 'complex') {
-      deepThought = await deepThinking(message, { memory: userMemory, history: conversationHistory });
-    }
-    
-    // Build system prompt
-    const systemPrompt = buildSystemPrompt(userMemory, searchResults, intent, deepThought);
-    
-    // Adjust temperature based on intent
-    let temperature = 0.7;
-    if (intent.type === 'creative') temperature = 0.9;
-    if (intent.type === 'technical') temperature = 0.5;
-    if (intent.type === 'calculation') temperature = 0.3;
-    if (intent.type === 'search') temperature = 0.4;
-    
-    // Call LLM
-    const chatCompletion = await callGroqWithRetry({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...conversationHistory,
-        { role: 'user', content: message }
-      ],
-      model: MODELS.main,
-      temperature,
-      max_tokens: 2500,
-      top_p: 0.9
-    });
-    
-    const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
-    
-    // Extract and update memory if personal info detected
-    let memoryUpdated = false;
-    const personalInfoPatterns = [
-      /tôi (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /mình (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /em (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /(tôi|mình|em)\s+(làm|học|sống ở|ở|đang)\s+\w+/i,
-      /(tôi|mình|em)\s+(thích|ghét|yêu|đam mê)\s+\w+/i,
-      /tuổi của (tôi|mình|em)/i,
-      /(tôi|mình|em)\s+\d+\s+tuổi/i,
-    ];
-    
-    const seemsPersonalInfo = personalInfoPatterns.some(p => p.test(message));
-    const isQuestion = message.trim().endsWith('?');
-    
-    if (seemsPersonalInfo && message.length > 15 && !isQuestion) {
-      console.log('🧠 Extracting memory...');
-      const memoryExtraction = await extractMemory(message, userMemory);
+
+    // ============================================
+    // SPECIAL COMMANDS
+    // ============================================
+
+    if (message.toLowerCase() === '/memory' || 
+        message.toLowerCase() === 'bạn nhớ gì về tôi' ||
+        message.toLowerCase() === 'bạn biết gì về tôi') {
       
-      if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-        const updatedMemory = await updateMemory(memoryKey, memoryExtraction.updates);
-        if (updatedMemory) {
-          memoryUpdated = true;
-          userMemory = updatedMemory.data;
-          console.log(`✅ Memory updated: ${Object.keys(memoryExtraction.updates).join(', ')}`);
+      let memoryText = '📝 Thông tin tôi nhớ về bạn:\n\n';
+      
+      if (Object.keys(userMemory).length === 0) {
+        memoryText = '💭 Tôi chưa có thông tin nào về bạn. Hãy chia sẻ với tôi nhé!';
+      } else {
+        for (const [key, value] of Object.entries(userMemory)) {
+          memoryText += `• ${key}: ${value}\n`;
         }
+        memoryText += `\n_Tổng cộng ${Object.keys(userMemory).length} thông tin đã lưu._`;
       }
-    }
-    
-    // Atomically append to history
-    conversationHistory = await appendToHistory(chatKey, message, assistantMessage);
-    
-    // Return response
-    return res.status(200).json({
-      success: true,
-      message: assistantMessage,
-      metadata: {
+      
+      return res.status(200).json({
+        success: true,
+        message: memoryText,
         userId,
-        conversationId,
-        historyLength: conversationHistory.length,
-        memoryUpdated,
-        memoryCount: Object.keys(userMemory).length,
-        memoryVersion: memoryData.version || 0,
-        usedWebSearch: usedSearch,
-        searchKeywords: usedSearch ? searchKeywords : null,
-        intent: intent.type,
-        complexity: intent.complexity,
-        usedDeepThinking: !!deepThought,
-        redisHealthy,
-        model: MODELS.main,
-        temperature,
-        timestamp: new Date().toISOString()
+        memoryCount: Object.keys(userMemory).length
+      });
+    }
+
+    if (message.toLowerCase() === '/forget' || 
+        message.toLowerCase() === 'quên tôi đi' ||
+        message.toLowerCase() === 'xóa thông tin') {
+      
+      await redis.del(memoryKey);
+      
+      return res.status(200).json({
+        success: true,
+        message: '🗑 Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu lại từ đầu nhé!',
+        userId
+      });
+    }
+
+    if (message.toLowerCase().startsWith('/forget ')) {
+      const fieldToDelete = message.substring(8).trim();
+      const realKey = Object.keys(userMemory).find(k => 
+        k.toLowerCase() === fieldToDelete.toLowerCase()
+      );
+
+      if (realKey) {
+        delete userMemory[realKey];
+        await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
+
+        return res.status(200).json({
+          success: true,
+          message: `🗑 Đã xóa thông tin: ${realKey}`,
+          userId
+        });
+      } else {
+        return res.status(200).json({
+          success: true,
+          message: `❓ Không tìm thấy: ${fieldToDelete}\n\nGõ /memory để xem danh sách.`,
+          userId
+        });
       }
-    });
-    
-  } catch (error) {
-    console.error('❌ Handler Error:', error);
-    
-    let errMsg = error.message || 'Internal server error';
-    let statusCode = 500;
-    
-    if (error.message?.includes('rate_limit')) {
-      errMsg = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau 1 phút.';
-      statusCode = 429;
-    } else if (error.message?.includes('Request quá lớn')) {
-      statusCode = 413;
-    } else if (error.message?.includes('không hợp lệ')) {
-      statusCode = 400;
-    } else if (error.message?.includes('Redis') || error.message?.includes('Cannot connect')) {
-      errMsg = '❌ Lỗi kết nối database. Vui lòng thử lại sau.';
-      statusCode = 503;
     }
-    
-    return res.status(statusCode).json({ 
-      success: false, 
-      error: errMsg,
-      timestamp: new Date().toISOString()
-    });
-  }
-} = memoryData.data || {};
-    
-    // Validate history structure
-    conversationHistory = conversationHistory.filter(msg => 
-      msg && 
-      typeof msg === 'object' && 
-      msg.role && 
-      msg.content && 
-      ['user', 'assistant', 'system'].includes(msg.role)
-    );
-    
-    // Analyze intent
-    const intent = await analyzeIntent(message, conversationHistory);
-    console.log('🎯 Intent:', intent.type, '| Complexity:', intent.complexity);
-    
-    // Smart summarization if history is too long
-    if (conversationHistory.length > 20) {
-      conversationHistory = await smartSummarizeHistory(conversationHistory, 12);
-    }
-    
-    // Web search if needed
+
+    // ============================================
+    // WEB SEARCH (if needed)
+    // ============================================
+
     let searchResults = null;
     let usedSearch = false;
-    if (await needsWebSearch(message, intent)) {
-      console.log('🔍 Web search triggered...');
+    
+    if (needsWebSearch(message)) {
+      console.log('🔍 Triggering web search...');
       const keywords = await extractSearchKeywords(message);
-      const rawResults = await searchWeb(keywords);
-      if (rawResults) {
-        searchResults = await summarizeSearchResults(rawResults, message);
+      searchResults = await searchWeb(keywords);
+      
+      if (searchResults) {
         usedSearch = true;
+        console.log('✅ Search completed successfully');
+      } else {
+        console.log('⚠ Search returned no results');
       }
     }
-    
-    // Deep thinking for complex queries
-    let deepThought = null;
-    if (intent.needsDeepThinking && intent.complexity === 'complex') {
-      deepThought = await deepThinking(message, { memory: userMemory, history: conversationHistory });
+
+    // ============================================
+    // BUILD CONVERSATION
+    // ============================================
+
+    conversationHistory.push({
+      role: 'user',
+      content: message
+    });
+
+    if (conversationHistory.length > CONFIG.redis.maxHistoryLength) {
+      conversationHistory = conversationHistory.slice(-CONFIG.redis.maxHistoryLength);
     }
+
+    const systemPrompt = buildSystemPrompt(userMemory, searchResults);
     
-    // Build system prompt
-    const systemPrompt = buildSystemPrompt(userMemory, searchResults, intent, deepThought);
-    
-    // Adjust temperature
-    let temperature = 0.7;
-    if (intent.type === 'creative') temperature = 0.9;
-    if (intent.type === 'technical') temperature = 0.5;
-    if (intent.type === 'calculation') temperature = 0.3;
-    
-    // Call LLM
     const chatCompletion = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: systemPrompt },
-        ...conversationHistory,
-        { role: 'user', content: message }
+        {
+          role: 'system',
+          content: systemPrompt
+        },
+        ...conversationHistory
       ],
-      model: MODELS.main,
-      temperature,
-      max_tokens: 2500,
-      top_p: 0.9
+      model: CONFIG.models.main,
+      temperature: 0.7,
+      max_tokens: 1024,
+      top_p: 0.9,
+      stream: false
     });
-    
-    const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
-    
-    // Extract and update memory if personal info detected
+
+    let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
+
+    // ============================================
+    // EXTRACT & UPDATE MEMORY
+    // ============================================
+
+    const memoryExtraction = await extractMemory(message, userMemory);
     let memoryUpdated = false;
-    const personalInfoPatterns = [
-      /tôi (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /mình (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /(tôi|mình|em)\s+(làm|học|sống ở|ở|đang)\s+\w+/i,
-      /(tôi|mình|em)\s+(thích|ghét|yêu|đam mê)\s+\w+/i,
-      /(tôi|mình|em)\s+\d+\s+tuổi/i,
-    ];
     
-    const seemsPersonalInfo = personalInfoPatterns.some(p => p.test(message));
-    
-    if (seemsPersonalInfo && message.length > 15 && !message.trim().endsWith('?')) {
-      const memoryExtraction = await extractMemory(message, userMemory);
+    if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
+      userMemory = { ...userMemory, ...memoryExtraction.updates };
+      await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
+      memoryUpdated = true;
       
-      if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-        const updatedMemory = await updateMemory(memoryKey, memoryExtraction.updates);
-        if (updatedMemory) {
-          memoryUpdated = true;
-          userMemory = updatedMemory.data;
-        }
-      }
+      console.log(`💾 Memory updated for ${userId}:`, userMemory);
+      
+      // Add subtle memory update notice
+      const memoryNotice = memoryExtraction.summary || 'Đã cập nhật thông tin.';
+      assistantMessage += `\n\n💾 _${memoryNotice}_`;
     }
-    
-    // Atomically append to history
-    conversationHistory = await appendToHistory(chatKey, message, assistantMessage);
-    
-    // Return response
+
+    // ============================================
+    // SAVE HISTORY
+    // ============================================
+
+    conversationHistory.push({
+      role: 'assistant',
+      content: assistantMessage
+    });
+
+    await redis.setex(chatKey, CONFIG.redis.historyTTL, JSON.stringify(conversationHistory));
+
+    // ============================================
+    // RETURN RESPONSE
+    // ============================================
+
     return res.status(200).json({
       success: true,
       message: assistantMessage,
@@ -798,35 +671,28 @@ export default async function handler(req, res) {
         historyLength: conversationHistory.length,
         memoryUpdated,
         memoryCount: Object.keys(userMemory).length,
-        memoryVersion: memoryData.version,
         usedWebSearch: usedSearch,
-        intent: intent.type,
-        complexity: intent.complexity,
-        usedDeepThinking: !!deepThought,
-        redisHealthy,
-        model: MODELS.main,
+        model: CONFIG.models.main,
         timestamp: new Date().toISOString()
       }
     });
-    
+
   } catch (error) {
-    console.error('❌ Handler Error:', error);
+    console.error('❌ Error:', error);
     
-    let errMsg = error.message || 'Internal server error';
+    let errorMessage = error.message || 'Internal server error';
     let statusCode = 500;
     
     if (error.message?.includes('rate_limit')) {
-      errMsg = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau 1 phút.';
+      errorMessage = '⚠ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau 1 phút.';
       statusCode = 429;
     } else if (error.message?.includes('Request quá lớn')) {
       statusCode = 413;
-    } else if (error.message?.includes('không hợp lệ')) {
-      statusCode = 400;
     }
     
-    return res.status(statusCode).json({ 
-      success: false, 
-      error: errMsg,
+    return res.status(statusCode).json({
+      success: false,
+      error: errorMessage,
       timestamp: new Date().toISOString()
     });
   }
