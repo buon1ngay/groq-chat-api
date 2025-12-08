@@ -47,88 +47,6 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   throw new Error(`Hết ${maxRetries} keys: ${lastError.message}`);
 }
 
-// 🔍 WEB SEARCH FUNCTION
-async function searchWeb(query) {
-  try {
-    console.log('🔍 Searching web for:', query);
-    
-    // Dùng DuckDuckGo Instant Answer API (FREE, không cần API key)
-    const response = await fetch(
-      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`
-    );
-    
-    const data = await response.json();
-    
-    let searchResults = '';
-    
-    // Abstract (câu trả lời trực tiếp)
-    if (data.Abstract) {
-      searchResults += `📌 ${data.Abstract}\n`;
-    }
-    
-    // Related Topics
-    if (data.RelatedTopics && data.RelatedTopics.length > 0) {
-      searchResults += '\n🔗 Thông tin liên quan:\n';
-      data.RelatedTopics.slice(0, 3).forEach((topic, i) => {
-        if (topic.Text) {
-          searchResults += `${i + 1}. ${topic.Text}\n`;
-        }
-      });
-    }
-    
-    // Nếu không có kết quả từ DuckDuckGo, thử Wikipedia
-    if (!searchResults.trim()) {
-      const wikiResponse = await fetch(
-        `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`
-      );
-      
-      if (wikiResponse.ok) {
-        const wikiData = await wikiResponse.json();
-        if (wikiData.extract) {
-          searchResults = `📚 Wikipedia: ${wikiData.extract}`;
-        }
-      }
-    }
-    
-    return searchResults || '❌ Không tìm thấy thông tin.';
-    
-  } catch (error) {
-    console.error('❌ Search error:', error);
-    return null;
-  }
-}
-
-// 🤖 PHÁT HIỆN CẦN SEARCH HAY KHÔNG
-function needsWebSearch(message) {
-  const searchTriggers = [
-    // Thời gian hiện tại
-    /hiện (tại|nay|giờ)|bây giờ|lúc này|ngày nay|năm \d{4}|tháng \d+/i,
-    
-    // Số liệu, thống kê
-    /bao nhiêu|mấy|số lượng|tổng số|có \d+/i,
-    
-    // Sự kiện gần đây
-    /mới nhất|gần đây|vừa rồi|hôm nay|hôm qua|tuần này|tháng này/i,
-    
-    // Giá cả, tỷ giá
-    /giá|bao nhiêu tiền|tỷ giá|đắt|rẻ/i,
-    
-    // Tin tức
-    /tin tức|sự kiện|diễn biến|thay đổi|cập nhật/i,
-    
-    // Địa lý, hành chính
-    /tỉnh|thành phố|quốc gia|đất nước|sáp nhập|chia tách/i,
-    
-    // Người nổi tiếng (status hiện tại)
-    /còn sống|đã chết|hiện tại làm gì|bây giờ ở đâu/i,
-    
-    // Công nghệ mới
-    /phiên bản mới|ra mắt|công bố|tính năng mới/i
-  ];
-  
-  return searchTriggers.some(pattern => pattern.test(message));
-}
-
 async function extractMemory(message, currentMemory) {
   try {
     const extractionPrompt = `Phân tích tin nhắn sau và trích xuất THÔNG TIN CÁ NHÂN QUAN TRỌNG cần lưu lâu dài.
@@ -198,15 +116,8 @@ QUY TẮC:
   }
 }
 
-function buildSystemPrompt(memory, searchResults = null) {
+function buildSystemPrompt(memory) {
   let prompt = 'Bạn tên là KAMI. Trợ lý AI thông minh hữu ích và thân thiện. Được tạo ra bởi Nguyễn Đức Thanh. Hãy trả lời bằng tiếng Việt một cách tự nhiên.';
-  
-  // ✅ THÊM KẾT QUẢ SEARCH VÀO SYSTEM PROMPT
-  if (searchResults) {
-    prompt += '\n\n🌐 THÔNG TIN MỚI NHẤT TỪ WEB:\n';
-    prompt += searchResults;
-    prompt += '\n\n⚠️ HÃY SỬ DỤNG thông tin web phía trên để trả lời CHÍNH XÁC nhất. Ưu tiên thông tin web hơn kiến thức cũ của bạn.\n';
-  }
   
   if (Object.keys(memory).length > 0) {
     prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
@@ -253,7 +164,6 @@ export default async function handler(req, res) {
 
     console.log(`💾 Memory cho ${userId}:`, userMemory);
 
-    // Commands
     if (message.toLowerCase() === '/memory' || 
         message.toLowerCase() === 'bạn nhớ gì về tôi' ||
         message.toLowerCase() === 'bạn biết gì về tôi') {
@@ -320,21 +230,7 @@ export default async function handler(req, res) {
       conversationHistory = conversationHistory.slice(-50);
     }
 
-    // ✅ KIỂM TRA XEM CÓ CẦN SEARCH WEB KHÔNG
-    let searchResults = null;
-    let usedSearch = false;
-    
-    if (needsWebSearch(message)) {
-      console.log('🔍 Triggering web search...');
-      searchResults = await searchWeb(message);
-      usedSearch = true;
-      
-      if (searchResults) {
-        console.log('✅ Search results:', searchResults.substring(0, 200) + '...');
-      }
-    }
-
-    const systemPrompt = buildSystemPrompt(userMemory, searchResults);
+    const systemPrompt = buildSystemPrompt(userMemory);
     
     const chatCompletion = await callGroqWithRetry({
       messages: [
@@ -352,11 +248,6 @@ export default async function handler(req, res) {
     });
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
-
-    // Thêm indicator nếu dùng web search
-    if (usedSearch && searchResults) {
-      assistantMessage += '\n\n🌐 _Thông tin được cập nhật từ web_';
-    }
 
     const memoryExtraction = await extractMemory(message, userMemory);
     
@@ -387,8 +278,7 @@ export default async function handler(req, res) {
       conversationId: conversationId,
       historyLength: conversationHistory.length,
       memoryUpdated: memoryUpdated,
-      memoryCount: Object.keys(userMemory).length,
-      usedWebSearch: usedSearch
+      memoryCount: Object.keys(userMemory).length
     });
 
   } catch (error) {
