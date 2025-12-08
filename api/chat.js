@@ -1,6 +1,3 @@
-🚀 CODE HOÀN CHỈNH: THÊM WEB SEARCH VÀO GROQ API
-Đây là code ĐẦY ĐỦ với tính năng tìm kiếm web tự động!
-📝 FILE: api/chat.js (HOÀN CHỈNH)
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
