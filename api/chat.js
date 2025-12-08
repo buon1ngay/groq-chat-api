@@ -1,11 +1,9 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
-
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
-
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
@@ -18,7 +16,7 @@ const API_KEYS = [
 const MODELS = {
   main: 'llama-3.3-70b-versatile',
   search: 'llama-3.1-8b-instant',
-  memory: 'llama-3.3-70b-versatile',
+  memory: 'llama-3.1-8b-instant',
   smart: 'llama-3.3-70b-versatile',
 };
 
@@ -32,7 +30,6 @@ function createGroqClient() {
   lastGroqKeyIndex = (lastGroqKeyIndex + 1) % API_KEYS.length;
   return new Groq({ apiKey: API_KEYS[lastGroqKeyIndex] });
 }
-
 const SEARCH_APIS = [
   {
     name: 'Serper',
@@ -122,210 +119,7 @@ const SEARCH_APIS = [
 console.log(`🔍 Load ${SEARCH_APIS.length} Search APIs: ${SEARCH_APIS.map(a => a.name).join(', ')}`);
 
 let lastSearchApiIndex = -1;
-const inFlightSearches = new Map();
-
-// Helper: Parse JSON an toàn hơn
-function safeParseJSON(text, defaultValue = null) {
-  if (!text) return defaultValue;
-  
-  try {
-    return JSON.parse(text);
-  } catch {
-    try {
-      const match = text.match(/\{[\s\S]*?\}/);
-      if (match) return JSON.parse(match[0]);
-    } catch {
-      console.warn('⚠️ JSON parse failed completely');
-    }
-    return defaultValue;
-  }
-}
-
-// Helper: Sanitize key để tránh injection
-function sanitizeKey(key) {
-  if (!key || typeof key !== 'string') return 'default';
-  return key.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 100);
-}
-
-// Helper: Normalize memory keys để tránh duplicate
-function normalizeMemoryKeys(updates) {
-  const normalized = {};
-  
-  // Mapping các key variations về chuẩn (lowercase, không dấu)
-  const keyMapping = {
-    'tên': 'tên',
-    'Tên': 'tên',
-    'name': 'tên',
-    
-    'tuổi': 'tuổi',
-    'Tuổi': 'tuổi',
-    'age': 'tuổi',
-    
-    'nghề': 'nghề nghiệp',
-    'Nghề': 'nghề nghiệp',
-    'nghề nghiệp': 'nghề nghiệp',
-    'Nghề nghiệp': 'nghề nghiệp',
-    'job': 'nghề nghiệp',
-    
-    'sở thích': 'sở thích',
-    'Sở thích': 'sở thích',
-    'hobby': 'sở thích',
-    'hobbies': 'sở thích',
-    
-    'ngôn ngữ lập trình yêu thích': 'ngôn ngữ lập trình',
-    'Ngôn ngữ lập trình yêu thích': 'ngôn ngữ lập trình',
-    'ngôn ngữ lập trình': 'ngôn ngữ lập trình',
-    'Ngôn ngữ lập trình': 'ngôn ngữ lập trình',
-    
-    'ngôn ngữ ưa thích': 'ngôn ngữ ưa thích',
-    'Ngôn ngữ ưa thích': 'ngôn ngữ ưa thích',
-    
-    'mối quan hệ': 'mối quan hệ',
-    'Mối quan hệ': 'mối quan hệ',
-    'relationship': 'mối quan hệ',
-    
-    'sinh nhật': 'sinh nhật',
-    'Sinh nhật': 'sinh nhật',
-    'birthday': 'sinh nhật',
-    'ngày sinh': 'sinh nhật',
-    
-    'địa chỉ': 'địa chỉ',
-    'Địa chỉ': 'địa chỉ',
-    'thành phố': 'địa chỉ',
-    'Thành phố': 'địa chỉ',
-    
-    'email': 'email',
-    'Email': 'email',
-    
-    'số điện thoại': 'số điện thoại',
-    'Số điện thoại': 'số điện thoại',
-    'phone': 'số điện thoại',
-  };
-  
-  for (const [key, value] of Object.entries(updates)) {
-    // Skip null/undefined
-    if (!value) continue;
-    
-    // Skip values không rõ ràng
-    const valueStr = String(value).toLowerCase();
-    if (valueStr.includes('không rõ') ||
-        valueStr.includes('không biết') ||
-        valueStr.includes('chưa có') ||
-        valueStr.includes('chưa rõ') ||
-        valueStr === 'none' ||
-        valueStr === 'n/a') {
-      console.log(`⚠️ Skipping unclear value: ${key}: ${value}`);
-      continue;
-    }
-    
-    // Normalize key
-    const normalizedKey = keyMapping[key] || key.toLowerCase().trim();
-    
-    // Nếu key đã tồn tại, merge values (cho sở thích)
-    if (normalized[normalizedKey] && normalizedKey === 'sở thích') {
-      // Merge sở thích
-      const existing = normalized[normalizedKey];
-      if (!existing.includes(value)) {
-        normalized[normalizedKey] = `${existing}, ${value}`;
-      }
-    } else {
-      normalized[normalizedKey] = value;
-    }
-  }
-  
-  return normalized;
-}
-
-// Helper: Cleanup memory - remove duplicates and unclear values
-function cleanupMemory(memory) {
-  const cleaned = {};
-  const seen = new Set();
-  
-  for (const [key, value] of Object.entries(memory)) {
-    const normalizedKey = key.toLowerCase().trim();
-    
-    // Skip duplicates
-    if (seen.has(normalizedKey)) {
-      console.log(`⚠️ Duplicate key detected, skipping: ${key}`);
-      continue;
-    }
-    
-    // Skip null/undefined
-    if (!value) continue;
-    
-    // Skip unclear values
-    const valueStr = String(value).toLowerCase();
-    if (valueStr.includes('không rõ') ||
-        valueStr.includes('không biết') ||
-        valueStr.includes('chưa có') ||
-        valueStr.includes('chưa rõ') ||
-        valueStr === 'none' ||
-        valueStr === 'n/a') {
-      console.log(`⚠️ Unclear value, skipping: ${key}: ${value}`);
-      continue;
-    }
-    
-    seen.add(normalizedKey);
-    cleaned[normalizedKey] = value;
-  }
-  
-  return cleaned;
-}
-
-// NEW: Detect memory management actions
-function detectMemoryAction(message) {
-  const lower = message.toLowerCase().trim();
-  
-  // CLEANUP MEMORY - Dọn dẹp duplicate
-  if (lower.match(/dọn dẹp|cleanup|sắp xếp|tối ưu.*memory|gọn gàng/i)) {
-    return { action: 'cleanup_memory' };
-  }
-  
-  // EXPLICIT MEMORY SAVE - User yêu cầu nhớ cụ thể
-  if (lower.match(/nhớ (rằng|là|giúp|hộ|cái này)|ghi nhớ|lưu lại|hãy nhớ|đừng quên|save|remember/i)) {
-    return { action: 'save_memory_explicit', message };
-  }
-  
-  // View memory - nhiều cách hỏi
-  if (lower.match(/xem|hiện|cho (tôi|mình|tao) xem|bạn nhớ gì|thông tin (đã lưu|về (tôi|mình|tao))|memory|đã biết gì/i)) {
-    return { action: 'view_memory' };
-  }
-  
-  // Clear all memory - xóa toàn bộ
-  if (lower.match(/quên hết|xóa (tất cả|toàn bộ|hết) (thông tin|memory|info)|reset memory|xóa sạch|bắt đầu lại/i)) {
-    return { action: 'clear_memory' };
-  }
-  
-  // Delete specific key - xóa từng field cụ thể
-  // FIX: Phải match CẢ keyword VÀ key name, không chỉ keyword
-  const deletePatterns = [
-    { pattern: /(quên|xóa|bỏ).*(tuổi)/i, key: 'tuổi' },
-    { pattern: /(quên|xóa|bỏ).*(tên)(?!\s*nghề)/i, key: 'tên' },  // Not followed by "nghề"
-    { pattern: /(quên|xóa|bỏ).*(nghề|job)/i, key: 'nghề nghiệp' },
-    { pattern: /(quên|xóa|bỏ).*(sở thích|hobby)/i, key: 'sở thích' },
-    { pattern: /(quên|xóa|bỏ).*(địa chỉ|thành phố|address)/i, key: 'địa chỉ' },
-    { pattern: /(quên|xóa|bỏ).*(email|mail)/i, key: 'email' },
-    { pattern: /(quên|xóa|bỏ).*(số điện thoại|phone|sđt)/i, key: 'số điện thoại' },
-    { pattern: /(quên|xóa|bỏ).*(sinh nhật|birthday|ngày sinh)/i, key: 'sinh nhật' },
-    { pattern: /(quên|xóa|bỏ).*(mối quan hệ|relationship)/i, key: 'mối quan hệ' },
-    { pattern: /(quên|xóa|bỏ).*(ngôn ngữ|language)/i, key: 'ngôn ngữ lập trình' },
-  ];
-  
-  for (const { pattern, key } of deletePatterns) {
-    if (pattern.test(lower)) {
-      console.log(`🎯 Matched delete pattern for key: ${key}`);
-      return { action: 'delete_memory_key', key };
-    }
-  }
-  
-  // Clear history - xóa lịch sử chat
-  if (lower.match(/xóa (lịch sử|chat|cuộc trò chuyện|tin nhắn)|clear (history|chat)/i)) {
-    return { action: 'clear_history' };
-  }
-  
-  return null; // Normal chat
-}
-
+const inFlightSearches = {};
 async function extractSearchKeywords(message) {
   try {
     const response = await callGroqWithRetry({
@@ -349,7 +143,6 @@ async function extractSearchKeywords(message) {
     return message;
   }
 }
-
 async function summarizeSearchResults(results, question) {
   if (!results || results.length < 100) return results;
   
@@ -378,35 +171,33 @@ async function summarizeSearchResults(results, question) {
     return results.substring(0, 1500);
   }
 }
-
 async function searchWeb(query) {
   if (!SEARCH_APIS.length) {
     console.warn('⚠️ No search APIs available');
     return null;
   }
-  
   const cleanedQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanedQuery}`;
-  
-  if (inFlightSearches.has(cleanedQuery)) {
+  if (inFlightSearches[cleanedQuery]) {
     console.log(`⚠️ Query đang chạy, bỏ qua: ${cleanedQuery}`);
     return null;
   }
-  
-  inFlightSearches.set(cleanedQuery, Date.now());
+  inFlightSearches[cleanedQuery] = true;
 
   try {
+    let cached = null;
     try { 
-      const cached = await redis.get(cacheKey);
+      cached = await redis.get(cacheKey);
       if (cached) {
-        const parsedCache = typeof cached === 'string' ? safeParseJSON(cached, cached) : cached;
+        if (typeof cached === 'string') {
+          try { cached = JSON.parse(cached); } catch {}
+        }
         console.log('✅ Cache hit:', cleanedQuery);
-        return parsedCache;
+        return cached;
       }
     } catch(e) { 
       console.warn('⚠️ Redis get cache failed:', e.message); 
     }
-    
     for (let i = 0; i < SEARCH_APIS.length; i++) {
       lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
       const api = SEARCH_APIS[lastSearchApiIndex];
@@ -414,7 +205,6 @@ async function searchWeb(query) {
       try {
         console.log(`🔎 Trying ${api.name}...`);
         const result = await api.search(cleanedQuery);
-        
         if (result && result.length >= 50) {
           try { 
             await redis.set(cacheKey, JSON.stringify(result), { ex: 1800 });
@@ -437,10 +227,9 @@ async function searchWeb(query) {
     return null;
 
   } finally {
-    inFlightSearches.delete(cleanedQuery);
+    setTimeout(() => { delete inFlightSearches[cleanedQuery]; }, 3000);
   }
 }
-
 async function analyzeIntent(message, history) {
   const triggers = {
     search: /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm|tra|search|năm (19|20)\d{2}|mới nhất|gần đây|tin tức|thời tiết|giá|tỷ giá|cập nhật|xu hướng/i,
@@ -457,7 +246,6 @@ async function analyzeIntent(message, history) {
     complexity: 'simple',
     needsDeepThinking: false
   };
-  
   if (triggers.search.test(message)) {
     intent.type = 'search';
     intent.needsSearch = true;
@@ -477,12 +265,10 @@ async function analyzeIntent(message, history) {
     intent.type = 'explanation';
     intent.needsDeepThinking = true;
   }
-  
   if (message.length > 200 || message.split('?').length > 2) {
     intent.complexity = 'complex';
     intent.needsDeepThinking = true;
   }
-  
   if (history.length > 5) {
     const recentTopics = history.slice(-5).map(h => h.content).join(' ');
     if (recentTopics.includes('code') || recentTopics.includes('lập trình')) {
@@ -492,7 +278,6 @@ async function analyzeIntent(message, history) {
 
   return intent;
 }
-
 async function needsWebSearch(message, intent) {
   if (intent.needsSearch) return true;
 
@@ -511,9 +296,7 @@ async function needsWebSearch(message, intent) {
     /so sánh|khác nhau|tốt hơn|nên chọn|đâu là/i,
     /\d+\s*(năm|tháng|tuần|ngày)\s*(trước|sau|tới|nữa)/i,
   ];
-  
   if (triggers.some(r => r.test(message))) return true;
-  
   if (message.includes('?') && message.length < 150) {
     try {
       const response = await callGroqWithRetry({
@@ -542,10 +325,8 @@ CHỈ TRẢ YES HOẶC NO.`
   
   return false;
 }
-
 async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   let lastError;
-  
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const groq = createGroqClient();
@@ -569,36 +350,31 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
       throw e;
     }
   }
-  
   throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError.message}`);
 }
-
 async function extractMemory(message, currentMemory) {
   try {
-    const prompt = `Phân tích tin nhắn và trích xuất thông tin CÁ NHÂN của user.
+    const prompt = `Phân tích tin nhắn và trích xuất thông tin CÁ NHÂN của user (tên, tuổi, nghề nghiệp, sở thích, tính cách, mối quan hệ, mục tiêu, ngôn ngữ ưa thích...).
 
 TIN NHẮN: "${message}"
 
 THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
 
-QUY TẮC BẮT BUỘC:
-1. CHỈ lưu thông tin CHẮC CHẮN và CỤ THỂ
-2. TUYỆT ĐỐI KHÔNG lưu giá trị: "không rõ", "không biết", "chưa có", "chưa rõ", "none", "N/A"
-3. Key PHẢI dùng các key chuẩn này: tên, tuổi, nghề nghiệp, sở thích, email, số điện thoại, địa chỉ, sinh nhật, mối quan hệ, ngôn ngữ lập trình
-4. Nếu THÔNG TIN ĐÃ BIẾT có key tương tự, PHẢI dùng ĐÚNG key đó
-5. Cập nhật nếu có thông tin mới CHÍNH XÁC hơn
-6. Nếu không có thông tin cụ thể, trả về hasNewInfo: false
+Quy tắc:
+- Chỉ lưu thông tin CHẮC CHẮN và QUAN TRỌNG
+- Cập nhật nếu có thông tin mới chính xác hơn
+- Không lưu thông tin tạm thời (như "đang đói", "đang buồn")
 
-Trả về JSON (CHỈ JSON THUẦN, KHÔNG TEXT/MARKDOWN):
+Trả về JSON:
 {
   "hasNewInfo": true/false,
-  "updates": { "key": "giá trị" },
+  "updates": { "key": "giá trị cụ thể" },
   "summary": "Tóm tắt ngắn"
 }`;
 
     const response = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG THÊM TEXT/MARKDOWN BẤT KỲ.' },
+        { role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG TEXT KHÁC.' },
         { role: 'user', content: prompt }
       ],
       model: MODELS.memory,
@@ -607,7 +383,11 @@ Trả về JSON (CHỈ JSON THUẦN, KHÔNG TEXT/MARKDOWN):
     });
     
     const content = response.choices[0]?.message?.content || '{}';
-    const parsed = safeParseJSON(content, { hasNewInfo: false });
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) return { hasNewInfo: false };
+    
+    const parsed = JSON.parse(jsonMatch[0]);
     
     if (parsed.hasNewInfo && !parsed.updates) {
       return { hasNewInfo: false };
@@ -620,7 +400,6 @@ Trả về JSON (CHỈ JSON THUẦN, KHÔNG TEXT/MARKDOWN):
     return { hasNewInfo: false };
   }
 }
-
 async function deepThinking(message, context) {
   try {
     console.log('🧠 Activating deep thinking mode...');
@@ -628,7 +407,6 @@ async function deepThinking(message, context) {
     const thinkingPrompt = `Phân tích câu hỏi sau theo từng bước logic:
 
 CÂU HỎI: "${message}"
-
 Hãy:
 1. Xác định vấn đề cốt lõi
 2. Liệt kê các yếu tố cần xem xét
@@ -651,24 +429,19 @@ Hãy:
     return null;
   }
 }
-
 function buildSystemPrompt(memory, searchResults = null, intent = null, deepThought = null) {
   let prompt = `Bạn là KAMI, một AI thông minh, chính xác và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
-
 NGUYÊN TẮC:
 1. Ngôn ngữ & Phong cách: Trả lời bằng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác. Xưng "tôi" hoặc theo cách user yêu cầu, gọi user tùy tiền tố họ chọn. Giọng điệu thân thiện nhưng chuyên nghiệp.
-
 2. Độ chính xác cao: 
    - Phân tích kỹ trước khi trả lời
    - Khi không chắc chắn thì tìm kiếm thêm thông tin
    - Đưa ra nhiều góc nhìn cho vấn đề phức tạp
-
 3. Tùy biến theo ngữ cảnh:
    - Kỹ thuật: chi tiết, code examples, best practices
    - Sáng tạo: sinh động, cảm xúc, kể chuyện
    - Giải thích: từng bước, dễ hiểu, ví dụ thực tế
    - Tính toán: logic rõ ràng, công thức, kiểm tra kết quả
-
 4. Emoji & Format: Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.`;
 
   if (intent) {
@@ -684,15 +457,12 @@ NGUYÊN TẮC:
       prompt += '\n⚖️ Chế độ so sánh: Phân tích ưu/nhược điểm, đưa ra bảng so sánh nếu có thể.';
     }
   }
-  
   if (deepThought) {
     prompt += `\n\n🧠 PHÂN TÍCH SÂU:\n${deepThought}\n\n⚠️ Dùng phân tích trên làm nền tảng cho câu trả lời.`;
   }
-  
   if (searchResults) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM CẬP NHẬT:\n${searchResults}\n\n⚠️ QUAN TRỌNG: Ưu tiên dùng dữ liệu mới nhất này.`;
   }
-  
   if (Object.keys(memory).length) {
     prompt += '\n\n👤 THÔNG TIN USER (cá nhân hóa câu trả lời):';
     for (const [k, v] of Object.entries(memory)) {
@@ -702,13 +472,12 @@ NGUYÊN TẮC:
   
   return prompt;
 }
-
 async function safeRedisGet(key, defaultValue = null) {
   try {
     const data = await redis.get(key);
     if (!data) return defaultValue;
     if (typeof data === 'object') return data;
-    return safeParseJSON(data, data);
+    try { return JSON.parse(data); } catch { return data; }
   } catch (e) {
     console.error(`❌ Redis GET failed for key ${key}:`, e.message);
     return defaultValue;
@@ -729,20 +498,35 @@ async function safeRedisSet(key, value, expirySeconds = null) {
     return false;
   }
 }
-
-function optimizeHistory(history) {
-  if (history.length <= 30) return history;
+async function summarizeHistory(history) {
+  if (history.length < 20) return history;
   
-  console.log('📝 Optimizing conversation history with sliding window...');
-  
-  const systemMessages = history.filter(m => m.role === 'system');
-  const conversationMessages = history.filter(m => m.role !== 'system');
-  
-  const recentMessages = conversationMessages.slice(-25);
-  
-  return [...systemMessages, ...recentMessages];
+  try {
+    console.log('📝 Summarizing old conversation...');
+    const oldMessages = history.slice(0, -10);
+    const recentMessages = history.slice(-10);
+    
+    const summary = await callGroqWithRetry({
+      messages: [
+        { role: 'system', content: 'Tóm tắt cuộc hội thoại sau thành 3-4 điểm chính. Giữ nguyên thông tin quan trọng.' },
+        { role: 'user', content: JSON.stringify(oldMessages) }
+      ],
+      model: MODELS.memory,
+      temperature: 0.3,
+      max_tokens: 300
+    });
+    
+    const summaryText = summary.choices[0]?.message?.content || '';
+    
+    return [
+      { role: 'system', content: `📋 Tóm tắt cuộc trò chuyện trước:\n${summaryText}` },
+      ...recentMessages
+    ];
+  } catch (e) {
+    console.warn('⚠️ History summarization failed:', e.message);
+    return history.slice(-15);
+  }
 }
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -759,256 +543,90 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Message too long (max 3000 characters)' });
     }
 
-    const safeUserId = sanitizeKey(userId);
-    const safeConversationId = sanitizeKey(conversationId);
-    const chatKey = `chat:${safeUserId}:${safeConversationId}`;
-    const memoryKey = `memory:${safeUserId}`;
+    const chatKey = `chat:${userId}:${conversationId}`;
+    const memoryKey = `memory:${userId}`;
 
-    // ============ DETECT MEMORY MANAGEMENT ACTIONS ============
-    const memoryAction = detectMemoryAction(message);
-    
-    if (memoryAction) {
-      console.log(`🎯 Memory action detected: ${memoryAction.action}`);
-      
-      // CLEANUP MEMORY - Dọn dẹp duplicate và unclear values
-      if (memoryAction.action === 'cleanup_memory') {
-        let memory = await safeRedisGet(memoryKey, {});
-        const originalCount = Object.keys(memory).length;
-        
-        memory = cleanupMemory(memory);
-        const cleanedCount = Object.keys(memory).length;
-        const removed = originalCount - cleanedCount;
-        
-        await safeRedisSet(memoryKey, memory);
-        
-        console.log(`✅ Cleaned up memory: ${originalCount} → ${cleanedCount} (removed ${removed})`);
-        
-        return res.status(200).json({
-          success: true,
-          message: `🧹 **Đã dọn dẹp memory!**\n\n📊 **Trước**: ${originalCount} thông tin\n✅ **Sau**: ${cleanedCount} thông tin\n🗑️ **Đã xóa**: ${removed} duplicate/unclear entries`,
-          memoryAction: 'cleanup_memory',
-          before: originalCount,
-          after: cleanedCount,
-          removed: removed,
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      // EXPLICIT MEMORY SAVE - User yêu cầu lưu cụ thể
-      if (memoryAction.action === 'save_memory_explicit') {
-        let userMemory = await safeRedisGet(memoryKey, {});
-        
-        console.log('💾 Explicit memory save requested');
-        const memoryExtraction = await extractMemory(message, userMemory);
-        
-        if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-          // NORMALIZE keys trước khi merge
-          const normalizedUpdates = normalizeMemoryKeys(memoryExtraction.updates);
-          
-          if (Object.keys(normalizedUpdates).length === 0) {
-            return res.status(200).json({
-              success: true,
-              message: '💭 Thông tin không đủ rõ ràng để lưu. Bạn có thể nói cụ thể hơn không?\n\n_Ví dụ: "Nhớ rằng email của tôi là nam@gmail.com"_',
-              memoryAction: 'save_memory_explicit',
-              noValidInfo: true,
-              timestamp: new Date().toISOString()
-            });
-          }
-          
-          userMemory = { ...userMemory, ...normalizedUpdates };
-          await safeRedisSet(memoryKey, userMemory);
-          
-          let response = '✅ **Đã ghi nhớ!**\n\n💾 **Thông tin vừa lưu:**\n';
-          for (const [key, value] of Object.entries(normalizedUpdates)) {
-            response += `• **${key}**: ${value}\n`;
-          }
-          
-          const summary = memoryExtraction.summary;
-          if (summary) {
-            response += `\n_${summary}_`;
-          }
-          
-          console.log(`✅ Explicitly saved: ${JSON.stringify(normalizedUpdates)}`);
-          
-          return res.status(200).json({
-            success: true,
-            message: response,
-            memoryAction: 'save_memory_explicit',
-            updates: normalizedUpdates,
-            totalMemoryCount: Object.keys(userMemory).length,
-            timestamp: new Date().toISOString()
-          });
-        } else {
-          return res.status(200).json({
-            success: true,
-            message: '💭 Tôi không tìm thấy thông tin cụ thể nào để lưu. Bạn có thể nói rõ hơn được không?\n\n_Ví dụ: "Nhớ rằng email của tôi là nam@gmail.com"_',
-            memoryAction: 'save_memory_explicit',
-            noInfoFound: true,
-            timestamp: new Date().toISOString()
-          });
-        }
-      }
-      
-      // VIEW MEMORY
-      if (memoryAction.action === 'view_memory') {
-        const memory = await safeRedisGet(memoryKey, {});
-        
-        let response = '';
-        if (Object.keys(memory).length === 0) {
-          response = '💭 Tôi chưa có thông tin nào về bạn. Hãy chia sẻ để tôi nhớ bạn hơn nhé!';
-        } else {
-          response = '💾 **Thông tin tôi đã lưu về bạn:**\n\n';
-          for (const [key, value] of Object.entries(memory)) {
-            response += `• **${key}**: ${value}\n`;
-          }
-          response += `\n_Tổng cộng ${Object.keys(memory).length} thông tin_`;
-        }
-        
-        return res.status(200).json({
-          success: true,
-          message: response,
-          memoryAction: 'view_memory',
-          memoryCount: Object.keys(memory).length,
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      // CLEAR MEMORY
-      if (memoryAction.action === 'clear_memory') {
-        try {
-          await redis.del(memoryKey);
-          console.log(`✅ Cleared memory for user: ${safeUserId}`);
-          
-          return res.status(200).json({
-            success: true,
-            message: '🗑️ Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu làm quen lại từ đầu nhé!',
-            memoryAction: 'clear_memory',
-            timestamp: new Date().toISOString()
-          });
-        } catch (e) {
-          return res.status(500).json({
-            success: false,
-            error: 'Không thể xóa memory: ' + e.message,
-            timestamp: new Date().toISOString()
-          });
-        }
-      }
-      
-      // DELETE SPECIFIC KEY
-      if (memoryAction.action === 'delete_memory_key') {
-        const keyToDelete = memoryAction.key;
-        let memory = await safeRedisGet(memoryKey, {});
-        
-        // Tìm exact match hoặc close match
-        let actualKey = null;
-        
-        // Priority 1: Exact match (case-insensitive)
-        for (const key of Object.keys(memory)) {
-          if (key.toLowerCase() === keyToDelete.toLowerCase()) {
-            actualKey = key;
-            break;
-          }
-        }
-        
-        // Priority 2: Key contains keyToDelete
-        if (!actualKey) {
-          for (const key of Object.keys(memory)) {
-            if (key.toLowerCase().includes(keyToDelete.toLowerCase())) {
-              actualKey = key;
-              break;
-            }
-          }
-        }
-        
-        // Priority 3: KeyToDelete contains key (less strict)
-        if (!actualKey) {
-          for (const key of Object.keys(memory)) {
-            if (keyToDelete.toLowerCase().includes(key.toLowerCase()) && key.length > 3) {
-              actualKey = key;
-              break;
-            }
-          }
-        }
-        
-        if (actualKey) {
-          const deletedValue = memory[actualKey];
-          delete memory[actualKey];
-          await safeRedisSet(memoryKey, memory);
-          console.log(`✅ Deleted memory key: ${actualKey}`);
-          
-          return res.status(200).json({
-            success: true,
-            message: `🗑️ Đã xóa thông tin về **${actualKey}** của bạn.\n\n_Giá trị đã xóa: ${deletedValue}_`,
-            memoryAction: 'delete_memory_key',
-            deletedKey: actualKey,
-            deletedValue: deletedValue,
-            remainingCount: Object.keys(memory).length,
-            timestamp: new Date().toISOString()
-          });
-        } else {
-          // Hiển thị các keys có sẵn để user biết
-          const availableKeys = Object.keys(memory).join(', ');
-          
-          return res.status(200).json({
-            success: true,
-            message: `💭 Tôi không có lưu thông tin về **${keyToDelete}** của bạn.\n\n📋 Các thông tin hiện có: ${availableKeys || '(trống)'}`,
-            memoryAction: 'delete_memory_key',
-            keyNotFound: true,
-            requestedKey: keyToDelete,
-            availableKeys: Object.keys(memory),
-            timestamp: new Date().toISOString()
-          });
-        }
-      }
-      
-      // CLEAR HISTORY
-      if (memoryAction.action === 'clear_history') {
-        try {
-          await redis.del(chatKey);
-          console.log(`✅ Cleared history for conversation: ${safeConversationId}`);
-          
-          return res.status(200).json({
-            success: true,
-            message: '🗑️ Đã xóa lịch sử hội thoại. Chúng ta bắt đầu cuộc trò chuyện mới nhé!',
-            memoryAction: 'clear_history',
-            timestamp: new Date().toISOString()
-          });
-        } catch (e) {
-          return res.status(500).json({
-            success: false,
-            error: 'Không thể xóa history: ' + e.message,
-            timestamp: new Date().toISOString()
-          });
-        }
-      }
-    }
-
-    // ============ NORMAL CHAT FLOW ============
-    
     let conversationHistory = await safeRedisGet(chatKey, []);
     let userMemory = await safeRedisGet(memoryKey, {});
     
     if (!Array.isArray(conversationHistory)) conversationHistory = [];
     if (typeof userMemory !== 'object' || userMemory === null) userMemory = {};
-    
+    const lowerMsg = message.toLowerCase().trim();
+    if (lowerMsg === '/memory') {
+      const memText = Object.keys(userMemory).length
+        ? '💾 Thông tin đã lưu về bạn:\n\n' + Object.entries(userMemory).map(([k,v]) => `• ${k}: ${v}`).join('\n')
+        : '💭 Tôi chưa có thông tin nào về bạn.';
+      return res.status(200).json({ 
+        success: true, 
+        message: memText,
+        memoryCount: Object.keys(userMemory).length 
+      });
+    }
+
+    if (lowerMsg.startsWith('/forget')) {
+      if (lowerMsg === '/forget') {
+        await redis.del(memoryKey);
+        return res.status(200).json({ 
+          success: true, 
+          message: '🗑️ Đã xóa toàn bộ thông tin về bạn. Bắt đầu lại từ đầu!' 
+        });
+      } else {
+        const keyToDelete = message.substring(8).trim();
+        if (userMemory[keyToDelete]) {
+          delete userMemory[keyToDelete];
+          await safeRedisSet(memoryKey, userMemory);
+          return res.status(200).json({ 
+            success: true, 
+            message: `🗑️ Đã xóa thông tin: ${keyToDelete}` 
+          });
+        } else {
+          return res.status(200).json({ 
+            success: true, 
+            message: `❓ Không tìm thấy thông tin về: ${keyToDelete}` 
+          });
+        }
+      }
+    }
+
+    if (lowerMsg === '/clear') {
+      await redis.del(chatKey);
+      return res.status(200).json({ 
+        success: true, 
+        message: '🗑️ Đã xóa lịch sử hội thoại. Bắt đầu cuộc trò chuyện mới!' 
+      });
+    }
+
+    if (lowerMsg === '/help') {
+      return res.status(200).json({
+        success: true,
+        message: `📋 Lệnh quản lý Kami:
+• \`/memory\` - Xem thông tin đã lưu về bạn
+• \`/forget [key]\` - Xóa thông tin cụ thể hoặc toàn bộ
+• \`/clear\` - Xóa lịch sử hội thoại
+• \`/help\` - Hiện danh sách lệnh
+✨ Tính năng thông minh:
+• 🔍 Tự động tìm kiếm web khi cần info mới nhất
+• 🧠 Deep thinking cho câu hỏi phức tạp
+• 💾 Nhớ thông tin cá nhân của bạn
+• 🎯 Tự động nhận diện intent để trả lời tốt hơn
+• 📊 Tóm tắt kết quả search để tiết kiệm tokens
+Hãy chat tự nhiên, tôi sẽ tự động điều chỉnh!`
+      });
+    }
     const intent = await analyzeIntent(message, conversationHistory);
     console.log('🎯 Intent detected:', intent);
 
     conversationHistory.push({ role: 'user', content: message });
-    
     if (conversationHistory.length > 30) {
-      conversationHistory = optimizeHistory(conversationHistory);
+      conversationHistory = await summarizeHistory(conversationHistory);
     }
-    
     let searchResults = null;
     let usedSearch = false;
     let searchKeywords = null;
-    
     if (await needsWebSearch(message, intent)) {
       console.log('🔍 Triggering web search...');
       searchKeywords = await extractSearchKeywords(message);
       const rawSearchResults = await searchWeb(searchKeywords);
-      
       if (rawSearchResults) {
         searchResults = await summarizeSearchResults(rawSearchResults, message);
         usedSearch = true;
@@ -1017,20 +635,16 @@ export default async function handler(req, res) {
         console.log('⚠️ Search returned no results');
       }
     }
-    
     let deepThought = null;
     if (intent.needsDeepThinking && intent.complexity === 'complex') {
       deepThought = await deepThinking(message, { memory: userMemory, history: conversationHistory });
     }
-    
     const systemPrompt = buildSystemPrompt(userMemory, searchResults, intent, deepThought);
-    
     let temperature = 0.7;
     if (intent.type === 'creative') temperature = 0.9;
     if (intent.type === 'technical') temperature = 0.5;
     if (intent.type === 'calculation') temperature = 0.3;
-    if (intent.type === 'search') temperature = 0.4;
-    
+    if (intent.type === 'search') temperature = 0.4; 
     const chatCompletion = await callGroqWithRetry({
       messages: [
         { role: 'system', content: systemPrompt }, 
@@ -1042,9 +656,7 @@ export default async function handler(req, res) {
       top_p: 0.9,
       stream: false
     });
-    
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
-    
     let memoryUpdated = false;
     const shouldExtractMemory = /tôi|mình|em|anh|chị|họ|gia đình|sống|làm|học|thích|ghét|yêu|muốn|là|tên/i.test(message);
     
@@ -1053,30 +665,23 @@ export default async function handler(req, res) {
       const memoryExtraction = await extractMemory(message, userMemory);
       
       if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-        // NORMALIZE keys trước khi merge
-        const normalizedUpdates = normalizeMemoryKeys(memoryExtraction.updates);
+        userMemory = { ...userMemory, ...memoryExtraction.updates };
+        await safeRedisSet(memoryKey, userMemory);
+        memoryUpdated = true;
         
-        if (Object.keys(normalizedUpdates).length > 0) {
-          userMemory = { ...userMemory, ...normalizedUpdates };
-          await safeRedisSet(memoryKey, userMemory);
-          memoryUpdated = true;
-          
-          const summary = memoryExtraction.summary || 'Đã lưu thông tin về bạn';
-          assistantMessage += `\n\n💾 _${summary}_`;
-          console.log('✅ Memory updated:', normalizedUpdates);
-        }
+        const summary = memoryExtraction.summary || 'Đã lưu thông tin về bạn';
+        assistantMessage += `\n\n💾 _${summary}_`;
+        console.log('✅ Memory updated:', memoryExtraction.updates);
       }
     }
 
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
-    
     await safeRedisSet(chatKey, conversationHistory, 2592000);
-    
     const metadata = {
       success: true,
       message: assistantMessage,
-      userId: safeUserId,
-      conversationId: safeConversationId,
+      userId,
+      conversationId,
       historyLength: conversationHistory.length,
       memoryUpdated,
       memoryCount: Object.keys(userMemory).length,
@@ -1106,7 +711,6 @@ export default async function handler(req, res) {
     } else if (error.message?.includes('không hợp lệ')) {
       statusCode = 400;
     }
-    
     return res.status(statusCode).json({ 
       success: false, 
       error: errMsg,
