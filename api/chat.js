@@ -1,10 +1,5 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
-
-// ============================================
-// CONFIGURATION - TẬP TRUNG TẤT CẢ CONFIG
-// ============================================
-
 const CONFIG = {
   models: {
     main: 'llama-3.3-70b-versatile',
@@ -22,20 +17,10 @@ const CONFIG = {
     maxResults: 8,
   }
 };
-
-// ============================================
-// REDIS SETUP
-// ============================================
-
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
-
-// ============================================
-// GROQ API KEYS - ROUND ROBIN
-// ============================================
-
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
@@ -83,11 +68,6 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   
   throw new Error(`❌ Hết ${maxRetries} API keys: ${lastError.message}`);
 }
-
-// ============================================
-// SEARCH APIs - ROUND ROBIN
-// ============================================
-
 const SEARCH_APIS = [
   {
     name: 'Serper',
@@ -217,8 +197,6 @@ async function searchWeb(query) {
   
   const cleanQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanQuery}`;
-  
-  // Check cache
   try {
     let cached = await redis.get(cacheKey);
     if (cached) {
@@ -231,8 +209,6 @@ async function searchWeb(query) {
   } catch (e) {
     console.warn('⚠ Cache check failed:', e.message);
   }
-  
-  // Try each API in round-robin
   for (let i = 0; i < SEARCH_APIS.length; i++) {
     currentSearchApiIndex = (currentSearchApiIndex + 1) % SEARCH_APIS.length;
     const api = SEARCH_APIS[currentSearchApiIndex];
@@ -242,7 +218,6 @@ async function searchWeb(query) {
       const result = await api.search(cleanQuery);
       
       if (result && result.length >= 50) {
-        // Cache result
         try {
           await redis.setex(cacheKey, CONFIG.redis.searchCacheTTL, JSON.stringify(result));
         } catch (e) {
@@ -263,11 +238,6 @@ async function searchWeb(query) {
   console.warn('❌ All search APIs failed');
   return null;
 }
-
-// ============================================
-// INTENT ANALYSIS
-// ============================================
-
 function needsWebSearch(message) {
   const searchTriggers = [
     /hiện (tại|nay|giờ)|bây giờ|lúc này/i,
@@ -311,11 +281,6 @@ async function extractSearchKeywords(message) {
     return message;
   }
 }
-
-// ============================================
-// MEMORY FUNCTIONS
-// ============================================
-
 function normalizeMemoryKey(key) {
   const normalized = key.toLowerCase().trim();
   
@@ -418,8 +383,6 @@ CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
     
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
-      
-      // Normalize keys
       if (parsed.updates) {
         const normalizedUpdates = {};
         for (const [key, value] of Object.entries(parsed.updates)) {
@@ -440,16 +403,10 @@ CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
     return { hasNewInfo: false };
   }
 }
-
-// ============================================
-// SYSTEM PROMPT BUILDER
-// ============================================
-
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
-
 NGUYÊN TẮC:
-– Mặc định dùng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác
+– Dùng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác
 – Xưng "tôi" hoặc theo yêu cầu. Gọi user theo tiền tố họ chọn
 – Luôn phân tích trước khi trả lời. Giọng chuyên nghiệp, bình tĩnh, rõ ràng
 – Tùy biến theo ngữ cảnh. Ưu tiên tuyệt đối theo mục đích câu hỏi
@@ -457,7 +414,7 @@ NGUYÊN TẮC:
 – Khi user chia sẻ thông tin cá nhân, ghi nhớ TỰ NHIÊN, chỉ nói "Được rồi", "Ok mình nhớ" nhẹ nhàng`;
 
   if (searchResults) {
-    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠️ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
+    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
   }
 
   if (Object.keys(memory).length > 0) {
@@ -467,7 +424,7 @@ NGUYÊN TẮC:
       prompt += `- ${key}: ${value}\n`;
     }
     
-    prompt += '\n⚠️ QUY TẮC:\n';
+    prompt += '\n⚠ QUY TẮC:\n';
     prompt += '- Sử dụng thông tin này TỰ NHIÊN trong cuộc trò chuyện\n';
     prompt += '- ĐỪNG nhắc đi nhắc lại trừ khi được hỏi\n';
     prompt += '- Thể hiện bạn NHỚ người dùng qua cách xưng hô, cách nói phù hợp\n';
@@ -475,11 +432,6 @@ NGUYÊN TẮC:
   
   return prompt;
 }
-
-// ============================================
-// MAIN HANDLER
-// ============================================
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -500,8 +452,6 @@ export default async function handler(req, res) {
 
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
-
-    // Load history and memory
     let conversationHistory = await redis.get(chatKey) || [];
     if (typeof conversationHistory === 'string') {
       conversationHistory = JSON.parse(conversationHistory);
@@ -511,11 +461,6 @@ export default async function handler(req, res) {
     if (typeof userMemory === 'string') {
       userMemory = JSON.parse(userMemory);
     }
-
-    // ============================================
-    // SPECIAL COMMANDS
-    // ============================================
-
     if (message.toLowerCase() === '/memory' || 
         message.toLowerCase() === 'bạn nhớ gì về tôi' ||
         message.toLowerCase() === 'bạn biết gì về tôi') {
@@ -575,11 +520,6 @@ export default async function handler(req, res) {
         });
       }
     }
-
-    // ============================================
-    // WEB SEARCH (if needed)
-    // ============================================
-
     let searchResults = null;
     let usedSearch = false;
     
@@ -595,10 +535,6 @@ export default async function handler(req, res) {
         console.log('⚠ Search returned no results');
       }
     }
-
-    // ============================================
-    // BUILD CONVERSATION
-    // ============================================
 
     conversationHistory.push({
       role: 'user',
@@ -627,11 +563,6 @@ export default async function handler(req, res) {
     });
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
-
-    // ============================================
-    // EXTRACT & UPDATE MEMORY
-    // ============================================
-
     const memoryExtraction = await extractMemory(message, userMemory);
     let memoryUpdated = false;
     
@@ -641,15 +572,9 @@ export default async function handler(req, res) {
       memoryUpdated = true;
       
       console.log(`💾 Memory updated for ${userId}:`, userMemory);
-      
-      // Add subtle memory update notice
       const memoryNotice = memoryExtraction.summary || 'Đã cập nhật thông tin.';
       assistantMessage += `\n\n💾 _${memoryNotice}_`;
     }
-
-    // ============================================
-    // SAVE HISTORY
-    // ============================================
 
     conversationHistory.push({
       role: 'assistant',
@@ -657,11 +582,6 @@ export default async function handler(req, res) {
     });
 
     await redis.setex(chatKey, CONFIG.redis.historyTTL, JSON.stringify(conversationHistory));
-
-    // ============================================
-    // RETURN RESPONSE
-    // ============================================
-
     return res.status(200).json({
       success: true,
       message: assistantMessage,
@@ -684,7 +604,7 @@ export default async function handler(req, res) {
     let statusCode = 500;
     
     if (error.message?.includes('rate_limit')) {
-      errorMessage = '⚠ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau 1 phút.';
+      errorMessage = '⚠ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau.';
       statusCode = 429;
     } else if (error.message?.includes('Request quá lớn')) {
       statusCode = 413;
