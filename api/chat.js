@@ -6,12 +6,13 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// 🔑 4 API KEYS
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
   process.env.GROQ_API_KEY_3,
   process.env.GROQ_API_KEY_4,
+  process.env.GROQ_API_KEY_5,
+  process.env.GROQ_API_KEY_6,
 ].filter(Boolean);
 
 if (API_KEYS.length === 0) {
@@ -36,7 +37,7 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
       lastError = error;
       
       if (error.status === 429 || error.message?.includes('rate_limit')) {
-        console.warn(`⚠️ Rate limit, thử key khác (${attempt + 1}/${maxRetries})`);
+        console.warn(`⚠ Rate limit, thử key khác (${attempt + 1}/${maxRetries})`);
         continue;
       }
       
@@ -126,7 +127,7 @@ function buildSystemPrompt(memory) {
       prompt += `- ${key}: ${value}\n`;
     }
     
-    prompt += '\n⚠️ QUY TẮC:\n';
+    prompt += '\n⚠ QUY TẮC:\n';
     prompt += '- Sử dụng các thông tin này một cách TỰ NHIÊN trong cuộc trò chuyện\n';
     prompt += '- ĐỪNG nhắc đi nhắc lại thông tin trừ khi được hỏi\n';
     prompt += '- Thể hiện bạn NHỚ người dùng qua cách xưng hô, cách nói chuyện phù hợp\n';
@@ -164,6 +165,7 @@ export default async function handler(req, res) {
 
     console.log(`💾 Memory cho ${userId}:`, userMemory);
 
+    // 🎯 LỆNH EXISTING MEMORY
     if (message.toLowerCase() === '/memory' || 
         message.toLowerCase() === 'bạn nhớ gì về tôi' ||
         message.toLowerCase() === 'bạn biết gì về tôi') {
@@ -187,6 +189,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // 🎯 LỆNH XÓA TOÀN BỘ MEMORY
     if (message.toLowerCase() === '/forget' || 
         message.toLowerCase() === 'quên tôi đi' ||
         message.toLowerCase() === 'xóa thông tin') {
@@ -195,32 +198,37 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: '🗑️ Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu lại từ đầu nhé!',
+        message: '🗑 Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu lại từ đầu nhé!',
         userId: userId
       });
     }
 
+    // 🎯 LỆNH XÓA 1 KEY — FIX PHÂN BIỆT HOA/THƯỜNG
     if (message.toLowerCase().startsWith('/forget ')) {
-      const keyToDelete = message.substring(8).trim();
-      
-      if (userMemory[keyToDelete]) {
-        delete userMemory[keyToDelete];
+      const rawInput = message.substring(8).trim();
+
+      // tìm key khớp 100% HOA + thường
+      const realKey = Object.keys(userMemory).find(k => k === rawInput);
+
+      if (realKey) {
+        delete userMemory[realKey];
         await redis.set(memoryKey, JSON.stringify(userMemory));
-        
+
         return res.status(200).json({
           success: true,
-          message: `🗑️ Đã xóa thông tin: **${keyToDelete}**`,
+          message: `🗑 Đã xóa thông tin: **${realKey}**`,
           userId: userId
         });
       } else {
         return res.status(200).json({
           success: true,
-          message: `❓ Không tìm thấy thông tin: **${keyToDelete}**\n\nGõ /memory để xem danh sách.`,
+          message: `❓ Không tìm thấy thông tin: **${rawInput}**\n\nGõ /memory để xem danh sách.`,
           userId: userId
         });
       }
     }
 
+    // LƯU HISTORY
     conversationHistory.push({
       role: 'user',
       content: message
@@ -287,7 +295,7 @@ export default async function handler(req, res) {
     let errorMessage = error.message || 'Internal server error';
     
     if (error.message?.includes('rate_limit')) {
-      errorMessage = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau vài phút.';
+      errorMessage = '⚠ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau vài phút.';
     }
     
     return res.status(500).json({
