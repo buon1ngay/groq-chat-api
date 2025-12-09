@@ -7,7 +7,7 @@ const CONFIG = {
     memory: 'llama-3.3-70b-versatile',
   },
   redis: {
-    historyTTL: 2592000, // 30 days
+    historyTTL: 7776000, // 90 days
     memoryTTL: 7776000,  // 90 days
     searchCacheTTL: 1800, // 30 minutes
     maxHistoryLength: 50,
@@ -244,7 +244,7 @@ function needsWebSearch(message) {
     /năm (19|20)\d{2}/i,
     /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)/i,
     /giá|tỷ giá|bao nhiêu tiền|chi phí/i,
-    /tin tức|sự kiện|cập nhật|thông tin|news/i,
+    /tin tức|sự kiện|cập nhật|thông tin/i,
     /thời tiết|nhiệt độ|khí hậu/i,
     /tìm|tra|search|tìm kiếm/i,
     /ai là|ai đã|là ai/i,
@@ -297,30 +297,23 @@ function normalizeMemoryKey(key) {
     'nghe nghiep': 'Nghề nghiệp',
     'công việc': 'Nghề nghiệp',
     'cong viec': 'Nghề nghiệp',
-    'job': 'Nghề nghiệp',
     'nơi ở': 'Địa điểm',
     'noi o': 'Địa điểm',
     'địa chỉ': 'Địa điểm',
     'dia chi': 'Địa điểm',
     'sống ở': 'Địa điểm',
-    'location': 'Địa điểm',
     'sở thích': 'Sở thích',
     'so thich': 'Sở thích',
     'thích': 'Sở thích',
-    'hobby': 'Sở thích',
-    'hobbies': 'Sở thích',
     'học vấn': 'Học vấn',
     'hoc van': 'Học vấn',
     'trường': 'Học vấn',
     'truong': 'Học vấn',
-    'education': 'Học vấn',
     'gia đình': 'Gia đình',
     'gia dinh': 'Gia đình',
-    'family': 'Gia đình',
     'mục tiêu': 'Mục tiêu',
     'muc tieu': 'Mục tiêu',
-    'goal': 'Mục tiêu',
-  };
+    };
   
   return keyMapping[normalized] || key;
 }
@@ -410,8 +403,7 @@ NGUYÊN TẮC:
 – Xưng "tôi" hoặc theo yêu cầu. Gọi user theo tiền tố họ chọn
 – Luôn phân tích trước khi trả lời. Giọng chuyên nghiệp, bình tĩnh, rõ ràng
 – Tùy biến theo ngữ cảnh. Ưu tiên tuyệt đối theo mục đích câu hỏi
-– Dùng emoji tiết chế. Tránh format quá mức trừ khi được yêu cầu
-– Khi user chia sẻ thông tin cá nhân, ghi nhớ TỰ NHIÊN, chỉ nói "Được rồi", "Ok mình nhớ" nhẹ nhàng`;
+– Dùng emoji để thêm sinh động nhưng không quá lạm dụng`;
 
   if (searchResults) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
