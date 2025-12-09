@@ -4,13 +4,13 @@ const CONFIG = {
   models: {
     main: 'llama-3.3-70b-versatile',
     search: 'llama-3.1-8b-instant',
-    memory: 'llama-3.3-70b-versatile',
+    memory: 'llama-3.1-8b-instant',
   },
   redis: {
     historyTTL: 7776000, // 90 days
     memoryTTL: 7776000,  // 90 days
     searchCacheTTL: 1800, // 30 minutes
-    maxHistoryLength: 50,
+    maxHistoryLength: 100,
   },
   search: {
     timeout: 10000,
@@ -66,7 +66,7 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
     }
   }
   
-  throw new Error(`❌ Hết ${maxRetries} API keys: ${lastError.message}`);
+  throw new Error('⚠ Hệ thống đang quá tải. Vui lòng thử lại sau.');
 }
 const SEARCH_APIS = [
   {
@@ -270,7 +270,7 @@ async function extractSearchKeywords(message) {
       ],
       model: CONFIG.models.search,
       temperature: 0.1,
-      max_tokens: 50
+      max_tokens: 100
     });
     
     const keywords = response.choices[0]?.message?.content?.trim() || message;
@@ -549,7 +549,7 @@ export default async function handler(req, res) {
       ],
       model: CONFIG.models.main,
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 2048,
       top_p: 0.9,
       stream: false
     });
