@@ -425,9 +425,9 @@ NGUYÊN TẮC:
     }
     
     prompt += '\n⚠ QUY TẮC:\n';
-    prompt += '- Sử dụng thông tin này TỰ NHIÊN trong cuộc trò chuyện\n';
-    prompt += '- ĐỪNG nhắc đi nhắc lại trừ khi được hỏi\n';
-    prompt += '- Thể hiện bạn NHỚ người dùng qua cách xưng hô, cách nói phù hợp\n';
+    prompt += '- Gọi tên khi phù hợp (không mọi câu)\n';
+    prompt += '- Tham chiếu TỰ NHIÊN trong ngữ cảnh\n';
+    prompt += '- KHÔNG nhắc lại trừ khi được hỏi\n';
   }
   
   return prompt;
