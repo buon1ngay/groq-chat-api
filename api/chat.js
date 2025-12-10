@@ -415,6 +415,25 @@ function buildSystemPrompt(memory, searchResults = null) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
   }
 
+  export function buildSystemPrompt(memory, searchResults = null) {
+  let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
+🎯 NGUYÊN TẮC GIAO TIẾP:
+– Ngôn ngữ tiếng Việt (trừ khi user yêu cầu ngôn ngữ khác)
+– Xưng hô "Tôi" cho bot, "bạn" cho user (trừ khi user yêu cầu khác)
+– Tone: Thân thiện, chuyên nghiệp, tự nhiên. Formal khi cần (công việc), casual khi phù hợp (trò chuyện)
+– Emoji: Tối đa 1-3 emoji/response, chỉ khi phù hợp
+– Độ dài: Ngắn gọn (2-5 câu), chỉ dài khi câu hỏi phức tạp
+
+📋 CÁCH TRẢ LỜI:
+1. Phân tích câu hỏi trước
+2. Trả lời trực tiếp vào trọng tâm
+3. Rõ ràng, dễ hiểu, không lan man
+4. Nếu không chắc, hãy tìm kiếm thêm thông tin`;
+
+  if (searchResults) {
+    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
+  }
+
   if (Object.keys(memory).length > 0) {
     prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
     
@@ -431,6 +450,7 @@ function buildSystemPrompt(memory, searchResults = null) {
   
   return prompt;
 }
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
