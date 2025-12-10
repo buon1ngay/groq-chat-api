@@ -10,7 +10,7 @@ const CONFIG = {
     historyTTL: 7776000, // 90 days
     memoryTTL: 7776000,  // 90 days
     searchCacheTTL: 1800, // 30 minutes
-    maxHistoryLength: 100,
+    maxHistoryLength: 50,
   },
   search: {
     timeout: 10000,
@@ -66,7 +66,7 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
     }
   }
   
-  throw new Error('⚠ Hệ thống đang quá tải. Vui lòng thử lại sau.');
+  throw new Error(`❌ Hết ${maxRetries} API keys: ${lastError.message}`);
 }
 const SEARCH_APIS = [
   {
@@ -244,7 +244,7 @@ function needsWebSearch(message) {
     /năm (19|20)\d{2}/i,
     /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)/i,
     /giá|tỷ giá|bao nhiêu tiền|chi phí/i,
-    /tin tức|sự kiện|cập nhật|thông tin/i,
+    /tin tức|sự kiện|cập nhật|thông tin|news/i,
     /thời tiết|nhiệt độ|khí hậu/i,
     /tìm|tra|search|tìm kiếm/i,
     /ai là|ai đã|là ai/i,
@@ -270,7 +270,7 @@ async function extractSearchKeywords(message) {
       ],
       model: CONFIG.models.search,
       temperature: 0.1,
-      max_tokens: 100
+      max_tokens: 50
     });
     
     const keywords = response.choices[0]?.message?.content?.trim() || message;
@@ -297,23 +297,30 @@ function normalizeMemoryKey(key) {
     'nghe nghiep': 'Nghề nghiệp',
     'công việc': 'Nghề nghiệp',
     'cong viec': 'Nghề nghiệp',
+    'job': 'Nghề nghiệp',
     'nơi ở': 'Địa điểm',
     'noi o': 'Địa điểm',
     'địa chỉ': 'Địa điểm',
     'dia chi': 'Địa điểm',
     'sống ở': 'Địa điểm',
+    'location': 'Địa điểm',
     'sở thích': 'Sở thích',
     'so thich': 'Sở thích',
     'thích': 'Sở thích',
+    'hobby': 'Sở thích',
+    'hobbies': 'Sở thích',
     'học vấn': 'Học vấn',
     'hoc van': 'Học vấn',
     'trường': 'Học vấn',
     'truong': 'Học vấn',
+    'education': 'Học vấn',
     'gia đình': 'Gia đình',
     'gia dinh': 'Gia đình',
+    'family': 'Gia đình',
     'mục tiêu': 'Mục tiêu',
     'muc tieu': 'Mục tiêu',
-    };
+    'goal': 'Mục tiêu',
+  };
   
   return keyMapping[normalized] || key;
 }
@@ -398,37 +405,13 @@ CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
 }
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
-🎯 NGUYÊN TẮC GIAO TIẾP:
-– Ngôn ngữ tiếng Việt (trừ khi user yêu cầu ngôn ngữ khác)
-– Xưng hô "Tôi" cho bot, "bạn" cho user (trừ khi user yêu cầu khác)
-– Tone: Thân thiện, chuyên nghiệp, tự nhiên. Formal khi cần (công việc), casual khi phù hợp (trò chuyện)
-– Emoji: Tối đa 1-3 emoji/response, chỉ khi phù hợp
-– Độ dài: Ngắn gọn (2-5 câu), chỉ dài khi câu hỏi phức tạp
-
-📋 CÁCH TRẢ LỜI:
-1. Phân tích câu hỏi trước
-2. Trả lời trực tiếp vào trọng tâm
-3. Rõ ràng, dễ hiểu, không lan man
-4. Nếu không chắc, hãy tìm kiếm thêm thông tin`;
-
-  if (searchResults) {
-    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
-  }
-
-  export function buildSystemPrompt(memory, searchResults = null) {
-  let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
-🎯 NGUYÊN TẮC GIAO TIẾP:
-– Ngôn ngữ tiếng Việt (trừ khi user yêu cầu ngôn ngữ khác)
-– Xưng hô "Tôi" cho bot, "bạn" cho user (trừ khi user yêu cầu khác)
-– Tone: Thân thiện, chuyên nghiệp, tự nhiên. Formal khi cần (công việc), casual khi phù hợp (trò chuyện)
-– Emoji: Tối đa 1-3 emoji/response, chỉ khi phù hợp
-– Độ dài: Ngắn gọn (2-5 câu), chỉ dài khi câu hỏi phức tạp
-
-📋 CÁCH TRẢ LỜI:
-1. Phân tích câu hỏi trước
-2. Trả lời trực tiếp vào trọng tâm
-3. Rõ ràng, dễ hiểu, không lan man
-4. Nếu không chắc, hãy tìm kiếm thêm thông tin`;
+NGUYÊN TẮC:
+– Dùng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác
+– Xưng "tôi" hoặc theo yêu cầu. Gọi user theo tiền tố họ chọn
+– Luôn phân tích trước khi trả lời. Giọng chuyên nghiệp, bình tĩnh, rõ ràng
+– Tùy biến theo ngữ cảnh. Ưu tiên tuyệt đối theo mục đích câu hỏi
+– Dùng emoji tiết chế. Tránh format quá mức trừ khi được yêu cầu
+– Khi user chia sẻ thông tin cá nhân, ghi nhớ TỰ NHIÊN, chỉ nói "Được rồi", "Ok mình nhớ" nhẹ nhàng`;
 
   if (searchResults) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
@@ -441,16 +424,14 @@ function buildSystemPrompt(memory, searchResults = null) {
       prompt += `- ${key}: ${value}\n`;
     }
     
-    prompt += '\nSỬ DỤNG THÔNG TIN:
-– Gọi tên khi phù hợp (không mọi câu)
-– Tham chiếu TỰ NHIÊN trong ngữ cảnh
-– KHÔNG nhắc lại trừ khi được hỏi
-– Thể hiện bạn NHỚ người dùng\n';
+    prompt += '\n⚠ QUY TẮC:\n';
+    prompt += '- Sử dụng thông tin này TỰ NHIÊN trong cuộc trò chuyện\n';
+    prompt += '- ĐỪNG nhắc đi nhắc lại trừ khi được hỏi\n';
+    prompt += '- Thể hiện bạn NHỚ người dùng qua cách xưng hô, cách nói phù hợp\n';
   }
   
   return prompt;
 }
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -576,7 +557,7 @@ export default async function handler(req, res) {
       ],
       model: CONFIG.models.main,
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 1024,
       top_p: 0.9,
       stream: false
     });
