@@ -499,7 +499,6 @@ CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
     return { hasNewInfo: false, updates: {} };
   }
 }
-
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
 NGUYÊN TẮC:
@@ -507,9 +506,7 @@ NGUYÊN TẮC:
 – Xưng "tôi" hoặc theo yêu cầu. Gọi user theo tiền tố họ chọn
 – Luôn phân tích trước khi trả lời. Giọng chuyên nghiệp, bình tĩnh, rõ ràng
 – Tùy biến theo ngữ cảnh. Ưu tiên tuyệt đối theo mục đích câu hỏi
-– Dùng emoji tiết chế. Tránh format quá mức trừ khi được yêu cầu
-– Khi user chia sẻ thông tin cá nhân, ghi nhớ TỰ NHIÊN, chỉ nói "Được rồi", "Ok mình nhớ" nhẹ nhàng`;
-
+– Dùng emoji tiết chế. Tránh format quá mức trừ khi được yêu cầu`;
   if (searchResults) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
   }
@@ -523,9 +520,8 @@ NGUYÊN TẮC:
       }
     }
     
-    prompt += '\n⚠ QUY TẮC:\n';
+    prompt += '\nQUY TẮC:\n';
     prompt += '- Gọi tên khi phù hợp (không mọi câu)\n';
-    prompt += '- Tham chiếu TỰ NHIÊN trong ngữ cảnh\n';
     prompt += '- KHÔNG nhắc lại trừ khi được hỏi\n';
   }
   
@@ -552,12 +548,8 @@ export default async function handler(req, res) {
 
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
-    
-    // ✅ FIX 6: Use safe Redis operations with proper defaults
     let conversationHistory = await safeRedisGet(chatKey, []);
     let userMemory = await safeRedisGet(memoryKey, {});
-    
-    // ✅ FIX 7: Double-check data types
     if (!Array.isArray(conversationHistory)) {
       console.warn('⚠ Invalid conversation history, resetting');
       conversationHistory = [];
