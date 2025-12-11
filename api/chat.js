@@ -20,7 +20,7 @@ export default async function handler(req, res) {
 
     // Khởi tạo Groq client
     const groq = new Groq({
-      apiKey: process.env.GROQ_API_KEY
+      apiKey: process.env.GROQ_API_KEY_1
     });
 
     // Lấy hoặc tạo conversation history
