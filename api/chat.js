@@ -289,108 +289,196 @@ async function extractSearchKeywords(message) {
     return message;
   }
 }
+
+// ========== MEMORY SYSTEM - FIXED VERSION ==========
+
+// Danh sách key chuẩn được phép
+const ALLOWED_MEMORY_KEYS = [
+  'Tên',
+  'Tuổi', 
+  'Nghề nghiệp',
+  'Sở thích',
+  'Địa điểm',
+  'Gia đình',
+  'Học vấn',
+  'Mục tiêu',
+  'Sinh nhật',
+  'Số điện thoại',
+  'Giới tính',
+  'Quê quán',
+  'Tình trạng hôn nhân',
+  'Sức khỏe'
+];
+
 function normalizeMemoryKey(key) {
-  const normalized = key.toLowerCase().trim();
+  if (!key || typeof key !== 'string') return null;
+  
+  const normalized = key.toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ');
   
   const keyMapping = {
     'ten': 'Tên',
     'tên': 'Tên',
     'tên đầy đủ': 'Tên',
     'họ tên': 'Tên',
+    'ho ten': 'Tên',
+    
     'tuổi': 'Tuổi',
     'tuoi': 'Tuổi',
+    
     'nghề': 'Nghề nghiệp',
     'nghe': 'Nghề nghiệp',
     'nghề nghiệp': 'Nghề nghiệp',
     'nghe nghiep': 'Nghề nghiệp',
     'công việc': 'Nghề nghiệp',
     'cong viec': 'Nghề nghiệp',
+    
     'nơi ở': 'Địa điểm',
     'noi o': 'Địa điểm',
     'địa chỉ': 'Địa điểm',
     'dia chi': 'Địa điểm',
     'sống ở': 'Địa điểm',
+    'song o': 'Địa điểm',
+    
     'sở thích': 'Sở thích',
     'so thich': 'Sở thích',
     'thích': 'Sở thích',
+    'thich': 'Sở thích',
+    
     'học vấn': 'Học vấn',
     'hoc van': 'Học vấn',
     'trường': 'Học vấn',
     'truong': 'Học vấn',
+    
     'gia đình': 'Gia đình',
     'gia dinh': 'Gia đình',
+    
     'mục tiêu': 'Mục tiêu',
     'muc tieu': 'Mục tiêu',
+    
     'sinh nhật': 'Sinh nhật',
     'sinh nhat': 'Sinh nhật',
     'ngày sinh': 'Sinh nhật',
     'ngay sinh': 'Sinh nhật',
+    
     'số điện thoại': 'Số điện thoại',
     'so dien thoai': 'Số điện thoại',
     'điện thoại': 'Số điện thoại',
     'dien thoai': 'Số điện thoại',
     'sđt': 'Số điện thoại',
+    'sdt': 'Số điện thoại',
+    
     'giới tính': 'Giới tính',
     'gioi tinh': 'Giới tính',
+    
     'quê quán': 'Quê quán',
     'que quan': 'Quê quán',
     'quê': 'Quê quán',
     'que': 'Quê quán',
+    
     'tình trạng hôn nhân': 'Tình trạng hôn nhân',
     'tinh trang hon nhan': 'Tình trạng hôn nhân',
     'hôn nhân': 'Tình trạng hôn nhân',
     'hon nhan': 'Tình trạng hôn nhân',
+    
     'sức khỏe': 'Sức khỏe',
     'suc khoe': 'Sức khỏe',
     'bệnh': 'Sức khỏe',
     'benh': 'Sức khỏe',
   };
   
-  return keyMapping[normalized] || key;
+  const mappedKey = keyMapping[normalized];
+  
+  if (mappedKey && ALLOWED_MEMORY_KEYS.includes(mappedKey)) {
+    return mappedKey;
+  }
+  
+  return null;
+}
+
+function sanitizeMemoryValue(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  
+  if (typeof value !== 'string') {
+    value = String(value);
+  }
+  
+  value = value.trim().replace(/\s+/g, ' ');
+  
+  if (value.length > 500) {
+    value = value.substring(0, 500);
+  }
+  
+  if (!/[a-zA-Z0-9\u00C0-\u1EF9]/.test(value)) {
+    return null;
+  }
+  
+  return value;
 }
 
 async function extractMemory(message, currentMemory) {
   try {
+    const formattedMemory = Object.keys(currentMemory).length > 0 
+      ? JSON.stringify(currentMemory, null, 2)
+      : 'Chưa có thông tin';
+
     const extractionPrompt = `Phân tích tin nhắn và trích xuất THÔNG TIN CÁ NHÂN QUAN TRỌNG cần lưu lâu dài.
 
 TIN NHẮN: "${message}"
 
-THÔNG TIN ĐÃ LƯU: ${JSON.stringify(currentMemory, null, 2)}
+THÔNG TIN ĐÃ LƯU:
+${formattedMemory}
 
-THÔNG TIN CẦN LƯU:
-- Tên, biệt danh
-- Nghề nghiệp, công việc
-- Sở thích, đam mê
-- Gia đình (vợ/chồng, con, sinh nhật...)
-- Địa điểm sống
-- Mục tiêu, dự định
-- Học vấn
-- Sức khỏe quan trọng
-- Bất kỳ thông tin USER YÊU CẦU BẠN NHỚ
+CHỈ LƯU CÁC LOẠI THÔNG TIN SAU (dùng KEY CHÍNH XÁC):
+- Tên (tên đầy đủ, biệt danh)
+- Tuổi (số tuổi)
+- Nghề nghiệp (công việc hiện tại)
+- Sở thích (sở thích, đam mê)
+- Địa điểm (nơi sống hiện tại)
+- Gia đình (thông tin vợ/chồng/con/cha mẹ)
+- Học vấn (trường học, bằng cấp)
+- Mục tiêu (mục tiêu, dự định tương lai)
+- Sinh nhật (ngày sinh)
+- Số điện thoại
+- Giới tính
+- Quê quán
+- Tình trạng hôn nhân
+- Sức khỏe (vấn đề sức khỏe quan trọng)
 
-QUY TẮC:
-- CHỈ lưu thông tin QUAN TRỌNG, lâu dài
-- KHÔNG lưu câu hỏi thông thường, yêu cầu tìm kiếm
-- Dùng key chuẩn: "Tên", "Tuổi", "Nghề nghiệp", "Sở thích", "Địa điểm", "Gia đình", "Học vấn", "Mục tiêu"
-- Nếu không có info mới, trả về hasNewInfo: false
+QUY TẮC BẮT BUỘC:
+1. CHỈ lưu thông tin QUAN TRỌNG, LÂU DÀI về người dùng
+2. KHÔNG lưu câu hỏi thường, yêu cầu tìm kiếm, trò chuyện tạm thời
+3. PHẢI dùng KEY CHÍNH XÁC từ danh sách trên
+4. Nếu thông tin đã có, chỉ CẬP NHẬT khi có thay đổi rõ ràng
+5. KHÔNG tạo key mới ngoài danh sách
+6. Nếu KHÔNG có thông tin mới, trả về hasNewInfo: false và updates: {}
+7. KHÔNG BAO GIỜ để giá trị null, undefined, hoặc rỗng
+8. Giá trị phải là STRING có ý nghĩa
 
-TRẢ VỀ JSON:
+TRẢ VỀ JSON (KHÔNG có markdown, KHÔNG có text khác):
 {
-  "hasNewInfo": true/false,
+  "hasNewInfo": true,
   "updates": {
-    "Tên": "giá trị",
-    "Tuổi": "giá trị"
+    "Tên": "Nguyễn Văn A",
+    "Tuổi": "25"
   },
-  "summary": "Tóm tắt ngắn"
+  "summary": "Lưu tên và tuổi"
 }
 
-CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
+HOẶC nếu không có info mới:
+{
+  "hasNewInfo": false,
+  "updates": {}
+}`;
 
     const response = await callGroqWithRetry({
       messages: [
         {
           role: 'system',
-          content: 'Bạn là trợ lý phân tích thông tin. CHỈ TRẢ JSON, không markdown hay text khác.'
+          content: 'Bạn là trợ lý phân tích thông tin cá nhân. CHỈ TRẢ VỀ JSON thuần túy, KHÔNG có ```json``` hay text giải thích.'
         },
         {
           role: 'user',
@@ -398,35 +486,74 @@ CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
         }
       ],
       model: CONFIG.models.memory,
-      temperature: 0.3,
+      temperature: 0.2,
       max_tokens: 500
     });
 
-    const content = response.choices[0]?.message?.content || '{}';
+    let content = response.choices[0]?.message?.content || '{}';
+    
+    content = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.updates) {
-        const normalizedUpdates = {};
-        for (const [key, value] of Object.entries(parsed.updates)) {
-          const normalizedKey = normalizeMemoryKey(key);
-          normalizedUpdates[normalizedKey] = value;
-        }
-        parsed.updates = normalizedUpdates;
-      }
-      
-      console.log('📊 Memory extraction:', parsed);
-      return parsed;
+    if (!jsonMatch) {
+      console.warn('⚠ No valid JSON found in memory extraction');
+      return { hasNewInfo: false, updates: {} };
     }
     
-    return { hasNewInfo: false };
+    const parsed = JSON.parse(jsonMatch[0]);
+    
+    if (typeof parsed.hasNewInfo !== 'boolean') {
+      console.warn('⚠ Invalid hasNewInfo field');
+      return { hasNewInfo: false, updates: {} };
+    }
+    
+    if (!parsed.hasNewInfo || !parsed.updates || typeof parsed.updates !== 'object') {
+      console.log('📊 No new memory info');
+      return { hasNewInfo: false, updates: {} };
+    }
+    
+    // Validate và normalize updates
+    const validatedUpdates = {};
+    for (const [rawKey, rawValue] of Object.entries(parsed.updates)) {
+      const normalizedKey = normalizeMemoryKey(rawKey);
+      const sanitizedValue = sanitizeMemoryValue(rawValue);
+      
+      if (!normalizedKey) {
+        console.warn(`⚠ Invalid memory key skipped: "${rawKey}"`);
+        continue;
+      }
+      
+      if (!sanitizedValue) {
+        console.warn(`⚠ Invalid memory value skipped for "${normalizedKey}": "${rawValue}"`);
+        continue;
+      }
+      
+      // Chỉ update nếu thực sự khác
+      if (currentMemory[normalizedKey] !== sanitizedValue) {
+        validatedUpdates[normalizedKey] = sanitizedValue;
+        console.log(`✅ Memory change: ${normalizedKey} = "${sanitizedValue}"`);
+      }
+    }
+    
+    if (Object.keys(validatedUpdates).length === 0) {
+      console.log('📊 No actual changes detected');
+      return { hasNewInfo: false, updates: {} };
+    }
+    
+    console.log('📊 Memory extraction successful:', validatedUpdates);
+    return { 
+      hasNewInfo: true, 
+      updates: validatedUpdates,
+      summary: parsed.summary 
+    };
     
   } catch (error) {
-    console.error('❌ Error extracting memory:', error);
-    return { hasNewInfo: false };
+    console.error('❌ Error extracting memory:', error.message);
+    return { hasNewInfo: false, updates: {} };
   }
 }
+
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
 NGUYÊN TẮC:
@@ -455,6 +582,7 @@ NGUYÊN TẮC:
   
   return prompt;
 }
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -477,7 +605,6 @@ export default async function handler(req, res) {
     const memoryKey = `memory:${userId}`;
     const lockKey = `lock:${userId}:${conversationId}`;
     
-    // Acquire lock
     const lockAcquired = await redis.set(lockKey, '1', { ex: 30, nx: true });
     if (!lockAcquired) {
       return res.status(429).json({ error: 'Another request is being processed' });
@@ -498,6 +625,7 @@ export default async function handler(req, res) {
         conversationHistory = [];
       }
 
+      // Load và validate memory
       let userMemory;
       try {
         userMemory = await redis.get(memoryKey) || {};
@@ -507,6 +635,26 @@ export default async function handler(req, res) {
         if (typeof userMemory !== 'object' || Array.isArray(userMemory)) {
           userMemory = {};
         }
+        
+        // Auto-clean invalid keys/values
+        const cleanedMemory = {};
+        for (const [key, value] of Object.entries(userMemory)) {
+          const normalizedKey = normalizeMemoryKey(key);
+          const sanitizedValue = sanitizeMemoryValue(value);
+          
+          if (normalizedKey && sanitizedValue) {
+            cleanedMemory[normalizedKey] = sanitizedValue;
+          } else {
+            console.warn(`🧹 Cleaned invalid memory: ${key}=${value}`);
+          }
+        }
+        
+        if (JSON.stringify(cleanedMemory) !== JSON.stringify(userMemory)) {
+          console.log('🔧 Memory auto-cleaned');
+          userMemory = cleanedMemory;
+          await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
+        }
+        
       } catch (e) {
         console.warn('⚠ Failed to parse memory, resetting');
         userMemory = {};
@@ -552,18 +700,16 @@ export default async function handler(req, res) {
 
       if (message.toLowerCase().startsWith('/forget ')) {
         const fieldToDelete = message.substring(8).trim();
-        const realKey = Object.keys(userMemory).find(k => 
-          k.toLowerCase() === fieldToDelete.toLowerCase()
-        );
-
-        if (realKey) {
-          delete userMemory[realKey];
+        const normalizedFieldToDelete = normalizeMemoryKey(fieldToDelete);
+        
+        if (normalizedFieldToDelete && userMemory[normalizedFieldToDelete]) {
+          delete userMemory[normalizedFieldToDelete];
           await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
           await redis.del(lockKey);
 
           return res.status(200).json({
             success: true,
-            message: `🗑 Đã xóa thông tin: ${realKey}`,
+            message: `🗑 Đã xóa thông tin: ${normalizedFieldToDelete}`,
             userId
           });
         } else {
@@ -618,15 +764,32 @@ export default async function handler(req, res) {
       });
 
       let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
+      
+      // Extract memory với validation chặt chẽ
       const memoryExtraction = await extractMemory(message, userMemory);
       let memoryUpdated = false;
       
       if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-        userMemory = { ...userMemory, ...memoryExtraction.updates };
-        await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
-        memoryUpdated = true;
+        // Merge updates vào current memory
+        const updatedMemory = { ...userMemory, ...memoryExtraction.updates };
         
-        console.log(`💾 Memory updated for ${userId}:`, userMemory);
+        // Double-check: chỉ lưu key hợp lệ
+        const finalMemory = {};
+        for (const [key, value] of Object.entries(updatedMemory)) {
+          if (ALLOWED_MEMORY_KEYS.includes(key) && value && value.trim()) {
+            finalMemory[key] = value;
+          }
+        }
+        
+        // Lưu vào Redis
+        try {
+          await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(finalMemory));
+          userMemory = finalMemory;
+          memoryUpdated = true;
+          console.log(`💾 Memory saved for ${userId}:`, finalMemory);
+        } catch (saveError) {
+          console.error('❌ Failed to save memory:', saveError.message);
+        }
       }
 
       conversationHistory.push({
@@ -652,7 +815,6 @@ export default async function handler(req, res) {
         }
       });
     } finally {
-      // Ensure lock is always released
       await redis.del(lockKey).catch(() => {});
     }
 
