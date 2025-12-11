@@ -1,5 +1,7 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
+import crypto from 'crypto';
+
 const CONFIG = {
   models: {
     main: 'llama-3.3-70b-versatile',
@@ -196,7 +198,9 @@ async function searchWeb(query) {
   }
   
   const cleanQuery = query.trim().toLowerCase();
-  const cacheKey = `search:${cleanQuery}`;
+  const hash = crypto.createHash('md5').update(cleanQuery).digest('hex');
+  const cacheKey = `search:${hash}`;
+  
   try {
     let cached = await redis.get(cacheKey);
     if (cached) {
@@ -250,6 +254,10 @@ function needsWebSearch(message) {
     /ai là|ai đã|là ai/i,
     /khi nào|lúc nào|bao giờ/i,
     /ở đâu|chỗ nào|tại đâu/i,
+    /so sánh|khác nhau|giống nhau|khác gì/i,
+    /đánh giá|review|nhận xét/i,
+    /cách|làm sao|làm thế nào/i,
+    /top \d+|tốt nhất|hay nhất|xuất sắc nhất/i,
   ];
   
   return searchTriggers.some(trigger => trigger.test(message));
@@ -320,6 +328,29 @@ function normalizeMemoryKey(key) {
     'mục tiêu': 'Mục tiêu',
     'muc tieu': 'Mục tiêu',
     'goal': 'Mục tiêu',
+    'sinh nhật': 'Sinh nhật',
+    'sinh nhat': 'Sinh nhật',
+    'ngày sinh': 'Sinh nhật',
+    'ngay sinh': 'Sinh nhật',
+    'số điện thoại': 'Số điện thoại',
+    'so dien thoai': 'Số điện thoại',
+    'điện thoại': 'Số điện thoại',
+    'dien thoai': 'Số điện thoại',
+    'sđt': 'Số điện thoại',
+    'giới tính': 'Giới tính',
+    'gioi tinh': 'Giới tính',
+    'quê quán': 'Quê quán',
+    'que quan': 'Quê quán',
+    'quê': 'Quê quán',
+    'que': 'Quê quán',
+    'tình trạng hôn nhân': 'Tình trạng hôn nhân',
+    'tinh trang hon nhan': 'Tình trạng hôn nhân',
+    'hôn nhân': 'Tình trạng hôn nhân',
+    'hon nhan': 'Tình trạng hôn nhân',
+    'sức khỏe': 'Sức khỏe',
+    'suc khoe': 'Sức khỏe',
+    'bệnh': 'Sức khỏe',
+    'benh': 'Sức khỏe',
   };
   
   return keyMapping[normalized] || key;
@@ -452,150 +483,187 @@ export default async function handler(req, res) {
 
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
-    let conversationHistory = await redis.get(chatKey) || [];
-    if (typeof conversationHistory === 'string') {
-      conversationHistory = JSON.parse(conversationHistory);
+    const lockKey = `lock:${userId}:${conversationId}`;
+    
+    // Acquire lock
+    const lockAcquired = await redis.set(lockKey, '1', { ex: 30, nx: true });
+    if (!lockAcquired) {
+      return res.status(429).json({ error: 'Another request is being processed' });
     }
-
-    let userMemory = await redis.get(memoryKey) || {};
-    if (typeof userMemory === 'string') {
-      userMemory = JSON.parse(userMemory);
-    }
-    if (message.toLowerCase() === '/memory' || 
-        message.toLowerCase() === 'bạn nhớ gì về tôi' ||
-        message.toLowerCase() === 'bạn biết gì về tôi') {
-      
-      let memoryText = '📝 Thông tin tôi nhớ về bạn:\n\n';
-      
-      if (Object.keys(userMemory).length === 0) {
-        memoryText = '💭 Tôi chưa có thông tin nào về bạn. Hãy chia sẻ với tôi nhé!';
-      } else {
-        for (const [key, value] of Object.entries(userMemory)) {
-          memoryText += `• ${key}: ${value}\n`;
+    
+    try {
+      let conversationHistory;
+      try {
+        conversationHistory = await redis.get(chatKey) || [];
+        if (typeof conversationHistory === 'string') {
+          conversationHistory = JSON.parse(conversationHistory);
         }
-        memoryText += `\n_Tổng cộng ${Object.keys(userMemory).length} thông tin đã lưu._`;
+        if (!Array.isArray(conversationHistory)) {
+          conversationHistory = [];
+        }
+      } catch (e) {
+        console.warn('⚠ Failed to parse history, resetting');
+        conversationHistory = [];
+      }
+
+      let userMemory;
+      try {
+        userMemory = await redis.get(memoryKey) || {};
+        if (typeof userMemory === 'string') {
+          userMemory = JSON.parse(userMemory);
+        }
+        if (typeof userMemory !== 'object' || Array.isArray(userMemory)) {
+          userMemory = {};
+        }
+      } catch (e) {
+        console.warn('⚠ Failed to parse memory, resetting');
+        userMemory = {};
       }
       
-      return res.status(200).json({
-        success: true,
-        message: memoryText,
-        userId,
-        memoryCount: Object.keys(userMemory).length
-      });
-    }
-
-    if (message.toLowerCase() === '/forget' || 
-        message.toLowerCase() === 'quên tôi đi' ||
-        message.toLowerCase() === 'xóa thông tin') {
-      
-      await redis.del(memoryKey);
-      
-      return res.status(200).json({
-        success: true,
-        message: '🗑 Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu lại từ đầu nhé!',
-        userId
-      });
-    }
-
-    if (message.toLowerCase().startsWith('/forget ')) {
-      const fieldToDelete = message.substring(8).trim();
-      const realKey = Object.keys(userMemory).find(k => 
-        k.toLowerCase() === fieldToDelete.toLowerCase()
-      );
-
-      if (realKey) {
-        delete userMemory[realKey];
-        await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
-
+      if (message.toLowerCase() === '/memory' || 
+          message.toLowerCase() === 'bạn nhớ gì về tôi' ||
+          message.toLowerCase() === 'bạn biết gì về tôi') {
+        
+        let memoryText = '📝 Thông tin tôi nhớ về bạn:\n\n';
+        
+        if (Object.keys(userMemory).length === 0) {
+          memoryText = '💭 Tôi chưa có thông tin nào về bạn. Hãy chia sẻ với tôi nhé!';
+        } else {
+          for (const [key, value] of Object.entries(userMemory)) {
+            memoryText += `• ${key}: ${value}\n`;
+          }
+          memoryText += `\n_Tổng cộng ${Object.keys(userMemory).length} thông tin đã lưu._`;
+        }
+        
+        await redis.del(lockKey);
         return res.status(200).json({
           success: true,
-          message: `🗑 Đã xóa thông tin: ${realKey}`,
-          userId
+          message: memoryText,
+          userId,
+          memoryCount: Object.keys(userMemory).length
         });
-      } else {
+      }
+
+      if (message.toLowerCase() === '/forget' || 
+          message.toLowerCase() === 'quên tôi đi' ||
+          message.toLowerCase() === 'xóa thông tin') {
+        
+        await redis.del(memoryKey);
+        await redis.del(lockKey);
+        
         return res.status(200).json({
           success: true,
-          message: `❓ Không tìm thấy: ${fieldToDelete}\n\nGõ /memory để xem danh sách.`,
+          message: '🗑 Đã xóa toàn bộ thông tin về bạn. Chúng ta bắt đầu lại từ đầu nhé!',
           userId
         });
       }
-    }
-    let searchResults = null;
-    let usedSearch = false;
-    
-    if (needsWebSearch(message)) {
-      console.log('🔍 Triggering web search...');
-      const keywords = await extractSearchKeywords(message);
-      searchResults = await searchWeb(keywords);
-      
-      if (searchResults) {
-        usedSearch = true;
-        console.log('✅ Search completed successfully');
-      } else {
-        console.log('⚠ Search returned no results');
+
+      if (message.toLowerCase().startsWith('/forget ')) {
+        const fieldToDelete = message.substring(8).trim();
+        const realKey = Object.keys(userMemory).find(k => 
+          k.toLowerCase() === fieldToDelete.toLowerCase()
+        );
+
+        if (realKey) {
+          delete userMemory[realKey];
+          await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
+          await redis.del(lockKey);
+
+          return res.status(200).json({
+            success: true,
+            message: `🗑 Đã xóa thông tin: ${realKey}`,
+            userId
+          });
+        } else {
+          await redis.del(lockKey);
+          return res.status(200).json({
+            success: true,
+            message: `❓ Không tìm thấy: ${fieldToDelete}\n\nGõ /memory để xem danh sách.`,
+            userId
+          });
+        }
       }
-    }
-
-    conversationHistory.push({
-      role: 'user',
-      content: message
-    });
-
-    if (conversationHistory.length > CONFIG.redis.maxHistoryLength) {
-      conversationHistory = conversationHistory.slice(-CONFIG.redis.maxHistoryLength);
-    }
-
-    const systemPrompt = buildSystemPrompt(userMemory, searchResults);
-    
-    const chatCompletion = await callGroqWithRetry({
-      messages: [
-        {
-          role: 'system',
-          content: systemPrompt
-        },
-        ...conversationHistory
-      ],
-      model: CONFIG.models.main,
-      temperature: 0.7,
-      max_tokens: 1024,
-      top_p: 0.9,
-      stream: false
-    });
-
-    let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
-    const memoryExtraction = await extractMemory(message, userMemory);
-    let memoryUpdated = false;
-    
-    if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-      userMemory = { ...userMemory, ...memoryExtraction.updates };
-      await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
-      memoryUpdated = true;
       
-      console.log(`💾 Memory updated for ${userId}:`, userMemory);
-      const memoryNotice = memoryExtraction.summary || 'Đã cập nhật thông tin.';
-      assistantMessage += `\n\n💾 _${memoryNotice}_`;
-    }
+      let searchResults = null;
+      let usedSearch = false;
+      
+      if (needsWebSearch(message)) {
+        console.log('🔍 Triggering web search...');
+        const keywords = await extractSearchKeywords(message);
+        searchResults = await searchWeb(keywords);
+        
+        if (searchResults) {
+          usedSearch = true;
+          console.log('✅ Search completed successfully');
+        } else {
+          console.log('⚠ Search returned no results');
+        }
+      }
 
-    conversationHistory.push({
-      role: 'assistant',
-      content: assistantMessage
-    });
+      conversationHistory.push({
+        role: 'user',
+        content: message
+      });
 
-    await redis.setex(chatKey, CONFIG.redis.historyTTL, JSON.stringify(conversationHistory));
-    return res.status(200).json({
-      success: true,
-      message: assistantMessage,
-      metadata: {
-        userId,
-        conversationId,
-        historyLength: conversationHistory.length,
-        memoryUpdated,
-        memoryCount: Object.keys(userMemory).length,
-        usedWebSearch: usedSearch,
+      if (conversationHistory.length > CONFIG.redis.maxHistoryLength) {
+        conversationHistory = conversationHistory.slice(-CONFIG.redis.maxHistoryLength);
+      }
+
+      const systemPrompt = buildSystemPrompt(userMemory, searchResults);
+      
+      const chatCompletion = await callGroqWithRetry({
+        messages: [
+          {
+            role: 'system',
+            content: systemPrompt
+          },
+          ...conversationHistory
+        ],
         model: CONFIG.models.main,
-        timestamp: new Date().toISOString()
+        temperature: 0.7,
+        max_tokens: 1024,
+        top_p: 0.9,
+        stream: false
+      });
+
+      let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
+      const memoryExtraction = await extractMemory(message, userMemory);
+      let memoryUpdated = false;
+      
+      if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
+        userMemory = { ...userMemory, ...memoryExtraction.updates };
+        await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
+        memoryUpdated = true;
+        
+        console.log(`💾 Memory updated for ${userId}:`, userMemory);
       }
-    });
+
+      conversationHistory.push({
+        role: 'assistant',
+        content: assistantMessage
+      });
+
+      await redis.setex(chatKey, CONFIG.redis.historyTTL, JSON.stringify(conversationHistory));
+      await redis.del(lockKey);
+      
+      return res.status(200).json({
+        success: true,
+        message: assistantMessage,
+        metadata: {
+          userId,
+          conversationId,
+          historyLength: conversationHistory.length,
+          memoryUpdated,
+          memoryCount: Object.keys(userMemory).length,
+          usedWebSearch: usedSearch,
+          model: CONFIG.models.main,
+          timestamp: new Date().toISOString()
+        }
+      });
+    } finally {
+      // Ensure lock is always released
+      await redis.del(lockKey).catch(() => {});
+    }
 
   } catch (error) {
     console.error('❌ Error:', error);
