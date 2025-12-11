@@ -555,13 +555,7 @@ HOẶC nếu không có info mới:
 }
 
 function buildSystemPrompt(memory, searchResults = null) {
-  let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
-NGUYÊN TẮC:
-– Dùng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác
-– Xưng "tôi" hoặc theo yêu cầu. Gọi user theo tiền tố họ chọn
-– Luôn phân tích trước khi trả lời. Giọng chuyên nghiệp, bình tĩnh, rõ ràng
-– Tùy biến theo ngữ cảnh. Ưu tiên tuyệt đối theo mục đích câu hỏi
-– Dùng emoji tiết chế. Tránh format quá mức trừ khi được yêu cầu`;
+  let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.`;
 
   if (searchResults) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
