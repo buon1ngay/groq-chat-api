@@ -1,5 +1,6 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
+
 const CONFIG = {
   models: {
     main: 'llama-3.3-70b-versatile',
@@ -17,10 +18,20 @@ const CONFIG = {
     maxResults: 8,
   }
 };
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+
+// ✅ FIX 1: Thêm error handling cho Redis initialization
+let redis;
+try {
+  redis = new Redis({
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  });
+  console.log('✅ Redis connected');
+} catch (error) {
+  console.error('❌ Redis initialization failed:', error.message);
+  redis = null;
+}
+
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
@@ -68,6 +79,79 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   
   throw new Error(`❌ Hết ${maxRetries} API keys: ${lastError.message}`);
 }
+
+// ✅ FIX 2: Safe Redis operations với fallback
+async function safeRedisGet(key, defaultValue = null) {
+  if (!redis) {
+    console.warn('⚠ Redis not available, using default value');
+    return defaultValue;
+  }
+  
+  try {
+    const value = await redis.get(key);
+    
+    if (value === null || value === undefined) {
+      return defaultValue;
+    }
+    
+    // ✅ FIX 3: Validate và parse JSON safely
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        // Validate structure
+        if (Array.isArray(defaultValue) && !Array.isArray(parsed)) {
+          console.warn(`⚠ Expected array for ${key}, got ${typeof parsed}`);
+          return defaultValue;
+        }
+        if (typeof defaultValue === 'object' && typeof parsed !== 'object') {
+          console.warn(`⚠ Expected object for ${key}, got ${typeof parsed}`);
+          return defaultValue;
+        }
+        return parsed;
+      } catch (e) {
+        console.warn(`⚠ Failed to parse JSON for ${key}:`, e.message);
+        return defaultValue;
+      }
+    }
+    
+    return value;
+  } catch (error) {
+    console.error(`❌ Redis GET error for ${key}:`, error.message);
+    return defaultValue;
+  }
+}
+
+async function safeRedisSet(key, value, ttl) {
+  if (!redis) {
+    console.warn('⚠ Redis not available, skipping set');
+    return false;
+  }
+  
+  try {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    await redis.setex(key, ttl, serialized);
+    return true;
+  } catch (error) {
+    console.error(`❌ Redis SET error for ${key}:`, error.message);
+    return false;
+  }
+}
+
+async function safeRedisDel(key) {
+  if (!redis) {
+    console.warn('⚠ Redis not available, skipping delete');
+    return false;
+  }
+  
+  try {
+    await redis.del(key);
+    return true;
+  } catch (error) {
+    console.error(`❌ Redis DEL error for ${key}:`, error.message);
+    return false;
+  }
+}
+
 const SEARCH_APIS = [
   {
     name: 'Serper',
@@ -197,18 +281,13 @@ async function searchWeb(query) {
   
   const cleanQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanQuery}`;
-  try {
-    let cached = await redis.get(cacheKey);
-    if (cached) {
-      if (typeof cached === 'string') {
-        try { cached = JSON.parse(cached); } catch {}
-      }
-      console.log('✅ Search cache hit');
-      return cached;
-    }
-  } catch (e) {
-    console.warn('⚠ Cache check failed:', e.message);
+  
+  const cached = await safeRedisGet(cacheKey);
+  if (cached) {
+    console.log('✅ Search cache hit');
+    return cached;
   }
+  
   for (let i = 0; i < SEARCH_APIS.length; i++) {
     currentSearchApiIndex = (currentSearchApiIndex + 1) % SEARCH_APIS.length;
     const api = SEARCH_APIS[currentSearchApiIndex];
@@ -218,12 +297,7 @@ async function searchWeb(query) {
       const result = await api.search(cleanQuery);
       
       if (result && result.length >= 50) {
-        try {
-          await redis.setex(cacheKey, CONFIG.redis.searchCacheTTL, JSON.stringify(result));
-        } catch (e) {
-          console.warn('⚠ Failed to cache search result');
-        }
-        
+        await safeRedisSet(cacheKey, result, CONFIG.redis.searchCacheTTL);
         console.log(`✅ ${api.name} success (${result.length} chars)`);
         return result;
       } else {
@@ -238,6 +312,7 @@ async function searchWeb(query) {
   console.warn('❌ All search APIs failed');
   return null;
 }
+
 function needsWebSearch(message) {
   const searchTriggers = [
     /hiện (tại|nay|giờ)|bây giờ|lúc này/i,
@@ -281,7 +356,10 @@ async function extractSearchKeywords(message) {
     return message;
   }
 }
+
 function normalizeMemoryKey(key) {
+  if (!key || typeof key !== 'string') return 'Khác';
+  
   const normalized = key.toLowerCase().trim();
   
   const keyMapping = {
@@ -383,26 +461,45 @@ CHỈ TRẢ JSON, KHÔNG TEXT KHÁC.`;
     
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.updates) {
+      
+      // ✅ FIX 4: Validate parsed object structure
+      if (typeof parsed !== 'object' || parsed === null) {
+        console.warn('⚠ Invalid memory extraction result');
+        return { hasNewInfo: false };
+      }
+      
+      // ✅ FIX 5: Safely handle updates object
+      if (parsed.updates && typeof parsed.updates === 'object') {
         const normalizedUpdates = {};
         for (const [key, value] of Object.entries(parsed.updates)) {
-          const normalizedKey = normalizeMemoryKey(key);
-          normalizedUpdates[normalizedKey] = value;
+          if (key && value && typeof value === 'string') {
+            const normalizedKey = normalizeMemoryKey(key);
+            normalizedUpdates[normalizedKey] = value;
+          }
         }
         parsed.updates = normalizedUpdates;
+        
+        // If no valid updates after normalization, mark as no new info
+        if (Object.keys(normalizedUpdates).length === 0) {
+          parsed.hasNewInfo = false;
+        }
+      } else {
+        parsed.hasNewInfo = false;
+        parsed.updates = {};
       }
       
       console.log('📊 Memory extraction:', parsed);
       return parsed;
     }
     
-    return { hasNewInfo: false };
+    return { hasNewInfo: false, updates: {} };
     
   } catch (error) {
     console.error('❌ Error extracting memory:', error);
-    return { hasNewInfo: false };
+    return { hasNewInfo: false, updates: {} };
   }
 }
+
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
 NGUYÊN TẮC:
@@ -417,11 +514,13 @@ NGUYÊN TẮC:
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
   }
 
-  if (Object.keys(memory).length > 0) {
+  if (memory && typeof memory === 'object' && Object.keys(memory).length > 0) {
     prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
     
     for (const [key, value] of Object.entries(memory)) {
-      prompt += `- ${key}: ${value}\n`;
+      if (key && value) {
+        prompt += `- ${key}: ${value}\n`;
+      }
     }
     
     prompt += '\n⚠ QUY TẮC:\n';
@@ -432,6 +531,7 @@ NGUYÊN TẮC:
   
   return prompt;
 }
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -452,15 +552,23 @@ export default async function handler(req, res) {
 
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
-    let conversationHistory = await redis.get(chatKey) || [];
-    if (typeof conversationHistory === 'string') {
-      conversationHistory = JSON.parse(conversationHistory);
+    
+    // ✅ FIX 6: Use safe Redis operations with proper defaults
+    let conversationHistory = await safeRedisGet(chatKey, []);
+    let userMemory = await safeRedisGet(memoryKey, {});
+    
+    // ✅ FIX 7: Double-check data types
+    if (!Array.isArray(conversationHistory)) {
+      console.warn('⚠ Invalid conversation history, resetting');
+      conversationHistory = [];
+    }
+    
+    if (typeof userMemory !== 'object' || userMemory === null) {
+      console.warn('⚠ Invalid user memory, resetting');
+      userMemory = {};
     }
 
-    let userMemory = await redis.get(memoryKey) || {};
-    if (typeof userMemory === 'string') {
-      userMemory = JSON.parse(userMemory);
-    }
+    // Memory commands
     if (message.toLowerCase() === '/memory' || 
         message.toLowerCase() === 'bạn nhớ gì về tôi' ||
         message.toLowerCase() === 'bạn biết gì về tôi') {
@@ -488,7 +596,7 @@ export default async function handler(req, res) {
         message.toLowerCase() === 'quên tôi đi' ||
         message.toLowerCase() === 'xóa thông tin') {
       
-      await redis.del(memoryKey);
+      await safeRedisDel(memoryKey);
       
       return res.status(200).json({
         success: true,
@@ -505,7 +613,7 @@ export default async function handler(req, res) {
 
       if (realKey) {
         delete userMemory[realKey];
-        await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
+        await safeRedisSet(memoryKey, userMemory, CONFIG.redis.memoryTTL);
 
         return res.status(200).json({
           success: true,
@@ -520,6 +628,8 @@ export default async function handler(req, res) {
         });
       }
     }
+
+    // Web search
     let searchResults = null;
     let usedSearch = false;
     
@@ -536,11 +646,13 @@ export default async function handler(req, res) {
       }
     }
 
+    // Add user message to history
     conversationHistory.push({
       role: 'user',
       content: message
     });
 
+    // Trim history if too long
     if (conversationHistory.length > CONFIG.redis.maxHistoryLength) {
       conversationHistory = conversationHistory.slice(-CONFIG.redis.maxHistoryLength);
     }
@@ -563,25 +675,39 @@ export default async function handler(req, res) {
     });
 
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
+    
+    // ✅ FIX 8: Extract memory with proper error handling
     const memoryExtraction = await extractMemory(message, userMemory);
     let memoryUpdated = false;
     
-    if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
-      userMemory = { ...userMemory, ...memoryExtraction.updates };
-      await redis.setex(memoryKey, CONFIG.redis.memoryTTL, JSON.stringify(userMemory));
-      memoryUpdated = true;
+    if (memoryExtraction.hasNewInfo && 
+        memoryExtraction.updates && 
+        Object.keys(memoryExtraction.updates).length > 0) {
       
-      console.log(`💾 Memory updated for ${userId}:`, userMemory);
-      const memoryNotice = memoryExtraction.summary || 'Đã cập nhật thông tin.';
-      assistantMessage += `\n\n💾 _${memoryNotice}_`;
+      // ✅ FIX 9: Merge memory safely to avoid race conditions
+      userMemory = { ...userMemory, ...memoryExtraction.updates };
+      const saved = await safeRedisSet(memoryKey, userMemory, CONFIG.redis.memoryTTL);
+      
+      if (saved) {
+        memoryUpdated = true;
+        console.log(`💾 Memory updated for ${userId}:`, userMemory);
+        
+        const memoryNotice = memoryExtraction.summary || 'Đã cập nhật thông tin.';
+        assistantMessage += `\n\n💾 _${memoryNotice}_`;
+      } else {
+        console.warn('⚠ Failed to save memory update');
+      }
     }
 
+    // Add assistant response to history
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
     });
 
-    await redis.setex(chatKey, CONFIG.redis.historyTTL, JSON.stringify(conversationHistory));
+    // Save conversation history
+    await safeRedisSet(chatKey, conversationHistory, CONFIG.redis.historyTTL);
+    
     return res.status(200).json({
       success: true,
       message: assistantMessage,
@@ -593,7 +719,8 @@ export default async function handler(req, res) {
         memoryCount: Object.keys(userMemory).length,
         usedWebSearch: usedSearch,
         model: CONFIG.models.main,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        redisAvailable: !!redis
       }
     });
 
