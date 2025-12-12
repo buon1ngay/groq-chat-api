@@ -752,8 +752,7 @@ export default async function handler(req, res) {
         userMemory = { ...userMemory, ...memoryExtraction.updates };
         const newMemoryCount = Object.keys(userMemory).length;
         
-        // FIX: Thêm TTL 90 ngày cho memory
-        await safeRedisSet(memoryKey, userMemory, 7776000); // 90 ngày = 7776000 giây
+        await safeRedisSet(memoryKey, userMemory, 7776000); // 90 ngày
         memoryUpdated = true;
         
         // Chỉ log ra console, KHÔNG thêm vào response để tự nhiên hơn
@@ -763,9 +762,7 @@ export default async function handler(req, res) {
     }
 
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
-    
-    // Lưu history với TTL 30 ngày
-    await safeRedisSet(chatKey, conversationHistory, 2592000); // 30 ngày = 2592000 giây
+    await safeRedisSet(chatKey, conversationHistory, 7776000); // 90 ngày
     
     const metadata = {
       success: true,
