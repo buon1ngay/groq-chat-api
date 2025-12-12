@@ -556,28 +556,29 @@ HOẶC nếu không có info mới:
 
 function buildSystemPrompt(memory, searchResults = null) {
   let prompt = `Bạn là KAMI, một AI thông minh và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
-NGUYÊN TẮC:
+
+NGUYÊN TẮC QUAN TRỌNG:
 – Dùng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác
-– Xưng "tôi" hoặc theo yêu cầu. Gọi user theo tiền tố họ chọn
-– Luôn phân tích trước khi trả lời. Giọng chuyên nghiệp, bình tĩnh, rõ ràng
-– Tùy biến theo ngữ cảnh. Ưu tiên tuyệt đối theo mục đích câu hỏi
-– Dùng emoji tiết chế. Tránh format quá mức trừ khi được yêu cầu`;
+– Xưng "tôi", gọi user theo tên nếu biết (KHÔNG lạm dụng)
+– Trả lời NGẮN GỌN, TỰ NHIÊN như con người
+– Với câu hỏi đơn giản ("Chào", "Hi"...) → chỉ 1-2 câu thôi
+– Với câu hỏi phức tạp → phân tích chi tiết
+– TUYỆT ĐỐI KHÔNG LẶP LẠI cùng một ý nhiều lần
+– Dùng emoji tiết chế (0-2 emoji mỗi response)
+– KHÔNG list hoặc format nhiều trừ khi được yêu cầu`;
 
   if (searchResults) {
     prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM MỚI NHẤT:\n${searchResults}\n\n⚠ ƯU TIÊN dùng thông tin này để trả lời chính xác và cập nhật.`;
   }
 
   if (Object.keys(memory).length > 0) {
-    prompt += '\n\n📝 THÔNG TIN BẠN BIẾT VỀ NGƯỜI DÙNG:\n';
+    prompt += '\n\n📝 THÔNG TIN VỀ NGƯỜI DÙNG (dùng TỰ NHIÊN, KHÔNG nhắc lại):';
     
     for (const [key, value] of Object.entries(memory)) {
-      prompt += `- ${key}: ${value}\n`;
+      prompt += `\n- ${key}: ${value}`;
     }
     
-    prompt += '\nQUY TẮC:\n';
-    prompt += 'Gọi tên khi phù hợp (không mọi câu)\n';
-    prompt += 'Tham chiếu TỰ NHIÊN trong ngữ cảnh\n';
-    prompt += 'KHÔNG nhắc lại trừ khi được hỏi\n';
+    prompt += '\n\n⚠ CHỈ dùng info này khi LIÊN QUAN đến câu hỏi. KHÔNG tự động nhắc lại mọi lần.';
   }
   
   return prompt;
@@ -748,6 +749,11 @@ export default async function handler(req, res) {
 
       const systemPrompt = buildSystemPrompt(userMemory, searchResults);
       
+      // Điều chỉnh parameters dựa trên độ phức tạp của message
+      const isSimpleMessage = message.trim().length < 20 && 
+                              !message.includes('?') && 
+                              /^(chào|hi|hello|hey|xin chào|ok|vâng|ừ|à|ơ|alo)/i.test(message.trim());
+      
       const chatCompletion = await callGroqWithRetry({
         messages: [
           {
@@ -757,9 +763,12 @@ export default async function handler(req, res) {
           ...conversationHistory
         ],
         model: CONFIG.models.main,
-        temperature: 0.7,
-        max_tokens: 1024,
+        temperature: isSimpleMessage ? 0.3 : 0.7, // Giảm temperature cho câu đơn giản
+        max_tokens: isSimpleMessage ? 100 : 1024, // Giới hạn tokens cho câu đơn giản
         top_p: 0.9,
+        frequency_penalty: 0.5, // Phạt lặp lại
+        presence_penalty: 0.3,  // Khuyến khích đa dạng
+        stop: ['\n\n\n', '---', '___'], // Stop khi gặp nhiều newline
         stream: false
       });
 
