@@ -1,4 +1,4 @@
-role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG TEXT KHÁC.' },import Groq from 'groq-sdk';
+import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
 // Kiểm tra Redis credentials trước
@@ -403,37 +403,55 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
 // FIX: Cải thiện logic extract memory - chỉ lưu thông tin thực sự quan trọng
 async function extractMemory(message, currentMemory) {
   try {
-    const prompt = `Phân tích tin nhắn và trích xuất CHỈ những thông tin CÁ NHÂN QUAN TRỌNG của user (tên thật, tuổi, nghề nghiệp, nơi ở, sở thích lâu dài, mối quan hệ quan trọng, mục tiêu dài hạn).
+    const prompt = `Phân tích tin nhắn và trích xuất CHỈ những thông tin CÁ NHÂN THỰC SỰ của user.
 
 TIN NHẮN: "${message}"
 
 THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
 
-Quy tắc BẮT BUỘC:
-- CHỈ lưu thông tin mang tính cá nhân lâu dài (tên, tuổi, nghề, sở thích...)
-- KHÔNG lưu hành động tạm thời: "đang đói", "muốn search", "cần tìm", "hỏi về..."
-- KHÔNG lưu câu hỏi hoặc yêu cầu: "làm sao để...", "giải thích...", "tìm kiếm..."
-- CHỈ lưu khi user THỰC SỰ CHIA SẺ về bản thân
-- Cập nhật nếu có thông tin mới chính xác hơn
+Quy tắc BẮT BUỘC - ĐỌC KỸ:
+1. **TÊN**: 
+   - CHỈ lưu tên thật có ít nhất 2 ký tự, viết hoa chữ cái đầu
+   - KHÔNG lưu: kiki, lala, baba, test, abc, xyz, hoặc bất kỳ từ vô nghĩa nào
+   - Ví dụ HỢP LỆ: Minh, An, Tuấn, Ngọc, Ly
+   - Ví dụ KHÔNG HỢP LỆ: kiki, lolo, abc, test123
 
-Ví dụ CẦN lưu:
-✅ "Tôi tên Minh, 25 tuổi" → Lưu tên và tuổi
-✅ "Mình là lập trình viên ở Hà Nội" → Lưu nghề và địa điểm
-✅ "Em thích chơi game và đọc sách" → Lưu sở thích
+2. **TUỔI**: 
+   - CHỈ lưu số từ 10-90
+   - KHÔNG lưu tuổi vô lý như 3, 5, 100, 200
 
-Ví dụ KHÔNG lưu:
-❌ "Tôi muốn tìm kiếm giá vàng" → Yêu cầu tìm kiếm, không phải info cá nhân
-❌ "Làm sao để học React?" → Câu hỏi, không phải info cá nhân  
-❌ "Họ nói gì về AI?" → Không liên quan đến user
+3. **NGHỀ NGHIỆP**: 
+   - CHỈ lưu nghề thực tế: lập trình viên, bác sĩ, sinh viên, giáo viên, nhân viên...
+   - KHÔNG lưu mô tả chung hoặc từ vô nghĩa
+
+4. **ĐỊA ĐIỂM**: 
+   - CHỈ lưu tên thành phố/quốc gia thật: Hà Nội, Sài Gòn, Đà Nẵng...
+   - KHÔNG lưu từ vô nghĩa hoặc địa chỉ chi tiết đầy đủ
+
+5. **CHUNG**:
+   - KHÔNG lưu hành động tạm thời, câu hỏi, yêu cầu
+   - CHỈ lưu khi user THỰC SỰ chia sẻ info bản thân
+
+Ví dụ HỢP LỆ - CẦN lưu:
+✅ "Tôi tên Minh, 25 tuổi" → {"name": "Minh", "age": 25}
+✅ "Mình là dev ở HN" → {"occupation": "Developer", "location": "Hà Nội"}
+✅ "Em thích đọc sách" → {"hobbies": "đọc sách"}
+✅ "Tôi tên Ly, 22 tuổi" → {"name": "Ly", "age": 22}
+
+Ví dụ KHÔNG HỢP LỆ - KHÔNG lưu:
+❌ "Tôi tên kiki" → TÊN VÔ NGHĨA
+❌ "Mình 3 tuổi" → TUỔI KHÔNG HỢP LÝ
+❌ "Tôi là lala" → TỪ VÔ NGHĨA
+❌ "Tôi muốn tìm thông tin" → YÊU CẦU, KHÔNG PHẢI INFO CÁ NHÂN
 
 Trả về JSON:
 {
   "hasNewInfo": true/false,
-  "updates": { "key": "giá trị cụ thể" },
-  "summary": "Tóm tắt ngắn"
+  "updates": { "key": "giá trị" },
+  "summary": "Mô tả ngắn"
 }
 
-Nếu không có thông tin cá nhân nào, trả về:
+Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
 {
   "hasNewInfo": false
 }`;
@@ -444,7 +462,7 @@ Nếu không có thông tin cá nhân nào, trả về:
         { role: 'user', content: prompt }
       ],
       model: MODELS.memory,
-      temperature: 0.2,
+      temperature: 0.1,
       max_tokens: 400
     });
     
@@ -608,6 +626,7 @@ async function safeRedisSet(key, value, expirySeconds = null) {
     return false;
   }
 }
+
 async function summarizeHistory(history) {
   if (history.length < 15) return history;
   
@@ -760,30 +779,40 @@ export default async function handler(req, res) {
     // FIX: Cải thiện logic extract memory - chỉ khi thực sự cần
     let memoryUpdated = false;
     
+    // Danh sách từ vô nghĩa cần chặn
+    const NONSENSE_WORDS = [
+      'kiki', 'lala', 'lolo', 'baba', 'kaka', 'bibi', 'xixi', 
+      'test', 'abc', 'xyz', '123', 'aaa', 'bbb', 'ccc',
+      'asdf', 'qwer', 'zxcv', 'haha', 'hihi', 'hoho', 'hehe',
+      'aaaa', 'bbbb', 'xxxx', 'yyyy', 'zzzz'
+    ];
+    
     // Kiểm tra xem message có thực sự chia sẻ thông tin cá nhân không
     const personalInfoPatterns = [
-  // Tên phải viết hoa chữ cái đầu, ít nhất 2 ký tự
-  /(?:tôi|mình|em)\s+(?:là|tên là|tên|họ)\s+([A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{1,}\s*){1,3}/i,
-  
-  // Tuổi phải từ 10-90
-  /(?:tôi|mình|em)\s+(?:năm nay\s+)?([1-9]\d?)\s+tuổi/i,
-  
-  // Nghề nghiệp thực tế
-  /(?:tôi|mình|em)\s+(?:là|làm)\s+(kỹ sư|bác sĩ|giáo viên|lập trình viên|developer|dev|sinh viên|học sinh|nhân viên|quản lý|designer|kinh doanh|marketing|engineer|teacher|student|doctor)/i,
-  
-  // Địa danh thật
-  /(?:tôi|mình|em)\s+(?:sống ở|ở|đang ở)\s+(Hà Nội|Sài Gòn|TP\.?\s*HCM|Đà Nẵng|Hải Phòng|Cần Thơ|Huế|Nha Trang|Vũng Tàu|[A-ZÀÁẠẢÃ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{3,})/i,
-  
-  // Sở thích cụ thể
-  /(?:tôi|mình|em)\s+(?:thích|yêu|đam mê)\s+([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ\s]{3,30})/i,
-];    
+      // Tên phải viết hoa chữ cái đầu, ít nhất 2 ký tự
+      /(?:tôi|mình|em)\s+(?:là|tên là|tên|họ)\s+([A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{1,}\s*){1,3}/i,
+      
+      // Tuổi phải từ 10-90
+      /(?:tôi|mình|em)\s+(?:năm nay\s+)?([1-9]\d?)\s+tuổi/i,
+      
+      // Nghề nghiệp thực tế
+      /(?:tôi|mình|em)\s+(?:là|làm)\s+(kỹ sư|bác sĩ|giáo viên|lập trình viên|developer|dev|sinh viên|học sinh|nhân viên|quản lý|designer|kinh doanh|marketing|engineer|teacher|student|doctor)/i,
+      
+      // Địa danh thật
+      /(?:tôi|mình|em)\s+(?:sống ở|ở|đang ở)\s+(Hà Nội|Sài Gòn|TP\.?\s*HCM|Đà Nẵng|Hải Phòng|Cần Thơ|Huế|Nha Trang|Vũng Tàu|[A-ZÀÁẠẢÃ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{3,})/i,
+      
+      // Sở thích cụ thể
+      /(?:tôi|mình|em)\s+(?:thích|yêu|đam mê)\s+([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ\s]{3,30})/i,
+    ];
+    
     const seemsPersonalInfo = personalInfoPatterns.some(pattern => pattern.test(message));
-const isQuestion = message.trim().endsWith('?');
-const isTooShort = message.length < 10;
-const containsNonsense = NONSENSE_WORDS.some(word => 
-  message.toLowerCase().includes(word)
-);
-if (seemsPersonalInfo && message.length > 15 && !isQuestion && !isTooShort && !containsNonsense) {
+    const isQuestion = message.trim().endsWith('?');
+    const isTooShort = message.length < 10;
+    const containsNonsense = NONSENSE_WORDS.some(word => 
+      message.toLowerCase().includes(word)
+    );
+    
+    if (seemsPersonalInfo && message.length > 15 && !isQuestion && !isTooShort && !containsNonsense) {
       console.log('🧠 Extracting memory from personal info...');
       const memoryExtraction = await extractMemory(message, userMemory);
       
@@ -848,4 +877,4 @@ if (seemsPersonalInfo && message.length > 15 && !isQuestion && !isTooShort && !c
       timestamp: new Date().toISOString()
     });
   }
-        }
+}
