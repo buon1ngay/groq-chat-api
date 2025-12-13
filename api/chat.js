@@ -10,8 +10,6 @@ const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
-
-// FIX: Thêm timeout cho Redis operations
 async function redisWithTimeout(operation, timeoutMs = 5000) {
   return Promise.race([
     operation,
@@ -20,8 +18,6 @@ async function redisWithTimeout(operation, timeoutMs = 5000) {
     )
   ]);
 }
-
-// Kiểm tra kết nối Redis lúc khởi động
 async function checkRedisHealth() {
   try {
     await redisWithTimeout(redis.ping());
@@ -32,8 +28,6 @@ async function checkRedisHealth() {
     throw new Error('Cannot connect to Redis. Please check your credentials.');
   }
 }
-
-// Gọi ngay khi start
 checkRedisHealth().catch(console.error);
 
 const API_KEYS = [
@@ -53,7 +47,6 @@ const MODELS = {
 };
 
 if (API_KEYS.length === 0) throw new Error('❌ Không tìm thấy GROQ_API_KEY!');
-
 console.log(`🔑 Load ${API_KEYS.length} GROQ API keys`);
 console.log(`🤖 Models: Main=${MODELS.main}, Search=${MODELS.search}, Memory=${MODELS.memory}`);
 
@@ -96,8 +89,7 @@ const SEARCH_APIS = [
           data.organic.slice(0, 5).forEach(item => {
             results += `📌 ${item.title}\n${item.snippet || ''}\n\n`;
           });
-        }
-        
+        }      
         return results.trim() || null;
       } catch (e) {
         clearTimeout(timer);
@@ -138,8 +130,7 @@ const SEARCH_APIS = [
           data.results.slice(0, 5).forEach(item =>
             results += `📌 ${item.title}\n${item.content ? item.content.substring(0, 200) : ''}...\n\n`
           );
-        }
-        
+        }        
         return results.trim() || null;
       } catch (e) {
         clearTimeout(timer);
@@ -148,21 +139,14 @@ const SEARCH_APIS = [
     }
   }
 ].filter(api => api.enabled);
-
 console.log(`🔍 Load ${SEARCH_APIS.length} Search APIs: ${SEARCH_APIS.map(a => a.name).join(', ')}`);
 
 let lastSearchApiIndex = Math.floor(Math.random() * SEARCH_APIS.length) - 1;
-
-// FIX: Sửa race condition - xóa Promise ngay sau khi xong
 const inFlightSearches = {};
-
-// FIX: Thêm rate limiting cho user
 const userRateLimits = new Map();
 function checkRateLimit(userId) {
   const now = Date.now();
   const userRequests = userRateLimits.get(userId) || [];
-  
-  // Xóa requests cũ hơn 1 phút
   const recentRequests = userRequests.filter(t => now - t < 60000);
   
   if (recentRequests.length >= 30) { // 30 req/phút
@@ -189,7 +173,6 @@ function sanitizeMessage(msg) {
     .trim()
     .substring(0, 3000); // Hard limit
 }
-
 async function extractSearchKeywords(message) {
   try {
     const response = await callGroqWithRetry({
@@ -242,8 +225,6 @@ async function summarizeSearchResults(results, question) {
     return results.substring(0, 1500);
   }
 }
-
-// FIX: Sửa race condition hoàn toàn
 async function searchWeb(query) {
   if (!SEARCH_APIS.length) {
     console.warn('⚠️ No search APIs available');
@@ -252,8 +233,6 @@ async function searchWeb(query) {
   
   const cleanedQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanedQuery}`;
-  
-  // Nếu đang có search cùng query, đợi kết quả
   if (inFlightSearches[cleanedQuery]) {
     console.log(`⏳ Query đang chạy, đợi kết quả: ${cleanedQuery}`);
     try {
@@ -263,11 +242,8 @@ async function searchWeb(query) {
       return null;
     }
   }
-
-  // Tạo Promise và lưu vào inFlightSearches
   inFlightSearches[cleanedQuery] = (async () => {
     try {
-      // Kiểm tra cache trước
       let cached = null;
       try { 
         cached = await redisWithTimeout(redis.get(cacheKey));
@@ -285,8 +261,7 @@ async function searchWeb(query) {
       // Thử từng API search
       for (let i = 0; i < SEARCH_APIS.length; i++) {
         lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
-        const api = SEARCH_APIS[lastSearchApiIndex];
-        
+        const api = SEARCH_APIS[lastSearchApiIndex];        
         try {
           console.log(`🔎 Trying ${api.name}...`);
           const result = await api.search(cleanedQuery);
@@ -318,7 +293,6 @@ async function searchWeb(query) {
       delete inFlightSearches[cleanedQuery];
       throw error;
     } finally {
-      // FIX: Xóa ngay sau khi hoàn thành, không cần timeout
       delete inFlightSearches[cleanedQuery];
     }
   })();
@@ -335,14 +309,12 @@ async function analyzeIntent(message, history) {
     explanation: /giải thích|tại sao|vì sao|làm sao|như thế nào|thế nào là/i,
     comparison: /so sánh|khác nhau|tốt hơn|nên chọn|đâu là|hay hơn/i,
   };
-
   let intent = {
     type: 'general',
     needsSearch: false,
     complexity: 'simple',
     needsDeepThinking: false
-  };
-  
+  };  
   if (triggers.search.test(message)) {
     intent.type = 'search';
     intent.needsSearch = true;
@@ -361,8 +333,7 @@ async function analyzeIntent(message, history) {
   } else if (triggers.explanation.test(message)) {
     intent.type = 'explanation';
     intent.needsDeepThinking = true;
-  }
-  
+  } 
   if (message.length > 200 || message.split('?').length > 2) {
     intent.complexity = 'complex';
     intent.needsDeepThinking = true;
@@ -396,9 +367,7 @@ async function needsWebSearch(message, intent) {
     /so sánh|khác nhau|tốt hơn|nên chọn|đâu là/i,
     /\d+\s*(năm|tháng|tuần|ngày)\s*(trước|sau|tới|nữa)/i,
   ];
-  
   if (triggers.some(r => r.test(message))) return true;
-  
   if (message.includes('?') && message.length < 150) {
     try {
       const response = await callGroqWithRetry({
@@ -415,8 +384,7 @@ CHỈ TRẢ YES HOẶC NO.`
         model: MODELS.search,
         temperature: 0.1,
         max_tokens: 10
-      });
-      
+      });   
       const ans = response.choices[0]?.message?.content?.trim().toUpperCase();
       return ans.includes('YES');
     } catch (e) {
@@ -443,8 +411,7 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
       
       if (e.status === 400) {
         throw new Error('❌ Request không hợp lệ: ' + (e?.message || 'Unknown error'));
-      }
-      
+      }    
       if (e.status === 429 || e?.message?.includes('rate_limit')) {
         console.warn(`⚠️ Rate limit key ${lastGroqKeyIndex}, trying next...`);
         continue;
@@ -455,28 +422,16 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   }
   throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError?.message || 'Unknown error'}`);
 }
-
-// FIX: Cải thiện validation tên
 function isValidName(name) {
   if (!name || typeof name !== 'string') return false;
   
   const trimmed = name.trim();
-  
-  // Kiểm tra độ dài
   if (trimmed.length < 2 || trimmed.length > 50) return false;
-  
-  // Kiểm tra ký tự lặp: "aaaa", "kkkk"
   if (/(.)\1{2,}/.test(trimmed.toLowerCase())) return false;
-  
-  // Kiểm tra chuỗi keyboard: "asdf", "qwer"
   const keyboards = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm', '1234567890'];
   if (keyboards.some(k => k.includes(trimmed.toLowerCase()))) return false;
-  
-  // Kiểm tra danh sách từ vô nghĩa
   const invalidNames = /^(kiki|lala|baba|lolo|kaka|xixi|bibi|test|abc|xyz|aa|bb|cc|dd|ee|haha|hihi|hoho|hehe|admin|user|guest|default)$/i;
   if (invalidNames.test(trimmed)) return false;
-  
-  // Phải bắt đầu bằng chữ hoa
   if (!/^[A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ]/.test(trimmed)) return false;
   
   return true;
@@ -491,37 +446,30 @@ TIN NHẮN: "${message}"
 THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
 
 Quy tắc BẮT BUỘC - ĐỌC KỸ:
-1. **TÊN**: 
+1. TÊN: 
    - CHỈ lưu tên thật có ít nhất 2 ký tự, viết hoa chữ cái đầu
    - KHÔNG lưu: kiki, lala, baba, test, abc, xyz, hoặc bất kỳ từ vô nghĩa nào
    - Ví dụ HỢP LỆ: Minh, An, Tuấn, Ngọc, Ly
    - Ví dụ KHÔNG HỢP LỆ: kiki, lolo, abc, test123
-
-2. **TUỔI**: 
-   - CHỈ lưu số từ 10-90
-   - KHÔNG lưu tuổi vô lý như 3, 5, 100, 200
-
-3. **NGHỀ NGHIỆP**: 
+2. TUỔI: 
+   - CHỈ lưu số từ 01-90
+   - KHÔNG lưu tuổi vô lý như 100, 200
+3. NGHỀ NGHIỆP: 
    - CHỈ lưu nghề thực tế: lập trình viên, bác sĩ, sinh viên, giáo viên, nhân viên...
    - KHÔNG lưu mô tả chung hoặc từ vô nghĩa
-
-4. **ĐỊA ĐIỂM**: 
+4. ĐỊA ĐIỂM: 
    - CHỈ lưu tên thành phố/quốc gia thật: Hà Nội, Sài Gòn, Đà Nẵng...
    - KHÔNG lưu từ vô nghĩa hoặc địa chỉ chi tiết đầy đủ
-
-5. **CHUNG**:
+5. CHUNG:
    - KHÔNG lưu hành động tạm thời, câu hỏi, yêu cầu
    - CHỈ lưu khi user THỰC SỰ chia sẻ info bản thân
-
 Ví dụ HỢP LỆ - CẦN lưu:
 ✅ "Tôi tên Minh, 25 tuổi" → {"name": "Minh", "age": 25}
 ✅ "Mình là dev ở HN" → {"occupation": "Developer", "location": "Hà Nội"}
 ✅ "Em thích đọc sách" → {"hobbies": "đọc sách"}
 ✅ "Tôi tên Ly, 22 tuổi" → {"name": "Ly", "age": 22}
-
 Ví dụ KHÔNG HỢP LỆ - KHÔNG lưu:
 ❌ "Tôi tên kiki" → TÊN VÔ NGHĨA
-❌ "Mình 3 tuổi" → TUỔI KHÔNG HỢP LÝ
 ❌ "Tôi là lala" → TỪ VÔ NGHĨA
 ❌ "Tôi muốn tìm thông tin" → YÊU CẦU, KHÔNG PHẢI INFO CÁ NHÂN
 
@@ -557,18 +505,13 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
     if (parsed.hasNewInfo && !parsed.updates) {
       return { hasNewInfo: false };
     }
-    
-    // FIX: VALIDATION BỔ SUNG - Kiểm tra lại sau khi LLM trả về
     if (parsed.hasNewInfo && parsed.updates) {
-      // Validate tên với function mới
       if (parsed.updates.name) {
         if (!isValidName(parsed.updates.name)) {
           delete parsed.updates.name;
           console.warn('⚠️ Rejected invalid name:', parsed.updates.name);
         }
       }
-      
-      // Validate tuổi
       if (parsed.updates.age) {
         const age = parseInt(parsed.updates.age);
         if (isNaN(age) || age < 10 || age > 90) {
@@ -586,8 +529,6 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
           console.warn('⚠️ Rejected invalid occupation:', occupation);
         }
       }
-      
-      // Nếu sau khi validate không còn updates nào
       if (Object.keys(parsed.updates).length === 0) {
         return { hasNewInfo: false };
       }
@@ -600,7 +541,6 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
     return { hasNewInfo: false };
   }
 }
-
 async function deepThinking(message, context) {
   try {
     console.log('🧠 Activating deep thinking mode...');
@@ -678,8 +618,6 @@ NGUYÊN TẮC:
   
   return prompt;
 }
-
-// FIX: Cải thiện Redis operations với validation và timeout
 async function safeRedisGet(key, defaultValue = null) {
   try {
     const data = await redisWithTimeout(redis.get(key));
@@ -691,7 +629,6 @@ async function safeRedisGet(key, defaultValue = null) {
     return defaultValue;
   }
 }
-
 async function safeRedisSet(key, value, expirySeconds = null) {
   try {
     const stringified = typeof value === 'string' ? value : JSON.stringify(value);
@@ -706,8 +643,6 @@ async function safeRedisSet(key, value, expirySeconds = null) {
     return false;
   }
 }
-
-// FIX: Sửa summarize history để tránh invalid format
 async function summarizeHistory(history) {
   if (history.length < 15) return history;
   
@@ -727,8 +662,6 @@ async function summarizeHistory(history) {
     });
     
     const summaryText = summary.choices[0]?.message?.content || '';
-    
-    // FIX: Thêm summary vào system prompt của message đầu tiên thay vì tạo message mới
     if (recentMessages.length > 0 && recentMessages[0].role === 'user') {
       recentMessages[0] = {
         ...recentMessages[0],
@@ -742,8 +675,6 @@ async function summarizeHistory(history) {
     return history.slice(-12);
   }
 }
-
-// FIX: Thêm metrics tracking
 const metrics = {
   totalRequests: 0,
   searchCalls: 0,
@@ -752,11 +683,8 @@ const metrics = {
   avgResponseTime: 0,
   lastReset: Date.now()
 };
-
 function updateMetrics(type, value = 1) {
   metrics[type] = (metrics[type] || 0) + value;
-  
-  // Reset metrics mỗi giờ để tránh overflow
   if (Date.now() - metrics.lastReset > 3600000) {
     Object.keys(metrics).forEach(key => {
       if (key !== 'lastReset') metrics[key] = 0;
@@ -767,8 +695,6 @@ function updateMetrics(type, value = 1) {
 
 export default async function handler(req, res) {
   const startTime = Date.now();
-  
-  // FIX: Thêm health check endpoint
   if (req.method === 'GET') {
     if (req.url === '/health' || req.url?.includes('/health')) {
       try {
@@ -815,8 +741,6 @@ export default async function handler(req, res) {
     if (sanitizedMessage.length > 3000) {
       return res.status(400).json({ error: 'Tin nhắn quá dài (tối đa 3000 ký tự)' });
     }
-    
-    // FIX: Check rate limit
     try {
       checkRateLimit(userId);
     } catch (e) {
@@ -828,14 +752,10 @@ export default async function handler(req, res) {
 
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
-
-    // FIX: Sử dụng mget với fallback riêng lẻ nếu fail
     let conversationHistory, userMemory;
     try {
       const results = await redisWithTimeout(redis.mget(chatKey, memoryKey));
       const [historyData, memoryData] = results || [null, null];
-      
-      // Parse history
       conversationHistory = historyData;
       if (typeof historyData === 'string') {
         try { conversationHistory = JSON.parse(historyData); } catch { conversationHistory = []; }
@@ -851,18 +771,13 @@ export default async function handler(req, res) {
       
     } catch (e) {
       console.warn('⚠️ Redis mget failed, trying individual gets:', e?.message || e);
-      
-      // Fallback: get riêng lẻ
       conversationHistory = await safeRedisGet(chatKey, []);
       userMemory = await safeRedisGet(memoryKey, {});
     }
-    
-    // FIX: Validate conversation history structure
     if (!Array.isArray(conversationHistory)) {
       console.warn('⚠️ Invalid history format (not array), resetting');
       conversationHistory = [];
     } else {
-      // Validate từng message có đúng format không
       conversationHistory = conversationHistory.filter(msg => {
         if (!msg || typeof msg !== 'object') return false;
         if (!msg.role || !msg.content) return false;
@@ -871,8 +786,6 @@ export default async function handler(req, res) {
         return true;
       });
     }
-    
-    // FIX: Validate memory structure
     if (typeof userMemory !== 'object' || userMemory === null || Array.isArray(userMemory)) {
       console.warn('⚠️ Invalid memory format, resetting');
       userMemory = {};
@@ -887,15 +800,12 @@ export default async function handler(req, res) {
     }
     conversationHistory.push({ role: 'user', content: sanitizedMessage });
     
-    // FIX: Giảm threshold từ 30 xuống 15
-    if (conversationHistory.length > 15) {
+     if (conversationHistory.length > 30) {
       conversationHistory = await summarizeHistory(conversationHistory);
     }
-    
     let searchResults = null;
     let usedSearch = false;
     let searchKeywords = null;
-    
     if (await needsWebSearch(sanitizedMessage, intent)) {
       console.log('🔍 Triggering web search...');
       updateMetrics('searchCalls');
@@ -943,8 +853,6 @@ export default async function handler(req, res) {
     if (usedSearch === false && intent.needsSearch && !searchResults) {
       assistantMessage = "⚠️ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
     }
-    
-    // FIX: Cải thiện logic extract memory
     let memoryUpdated = false;
     
     const NONSENSE_WORDS = [
