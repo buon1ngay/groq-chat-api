@@ -1,4 +1,4 @@
-import Groq from 'groq-sdk';
+role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG TEXT KHÁC.' },import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
 // Kiểm tra Redis credentials trước
@@ -440,7 +440,7 @@ Nếu không có thông tin cá nhân nào, trả về:
 
     const response = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: 'Bạn là trợ lý phân tích thông tin user. CHỈ TRẢ JSON THUẦN, KHÔNG TEXT KHÁC.' },
+        { role: 'system', content: 'Bạn là trợ lý phân tích NGHIÊM NGẶT. CHỈ lưu thông tin CÁ NHÂN THẬT, từ chối mọi từ vô nghĩa như kiki, lala, test. CHỈ TRẢ JSON THUẦN.' },
         { role: 'user', content: prompt }
       ],
       model: MODELS.memory,
@@ -457,6 +457,45 @@ Nếu không có thông tin cá nhân nào, trả về:
     
     if (parsed.hasNewInfo && !parsed.updates) {
       return { hasNewInfo: false };
+    }
+    
+    // **VALIDATION BỔ SUNG** - Kiểm tra lại sau khi LLM trả về
+    if (parsed.hasNewInfo && parsed.updates) {
+      // Validate tên
+      if (parsed.updates.name) {
+        const name = parsed.updates.name.trim();
+        const invalidNames = /^(kiki|lala|baba|lolo|kaka|xixi|bibi|test|abc|xyz|aa|bb|cc|dd|ee|haha|hihi|hoho)$/i;
+        
+        // Loại bỏ tên vô nghĩa
+        if (name.length < 2 || invalidNames.test(name) || !/^[A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ]/.test(name)) {
+          delete parsed.updates.name;
+          console.warn('⚠️ Rejected invalid name:', name);
+        }
+      }
+      
+      // Validate tuổi
+      if (parsed.updates.age) {
+        const age = parseInt(parsed.updates.age);
+        if (isNaN(age) || age < 10 || age > 90) {
+          delete parsed.updates.age;
+          console.warn('⚠️ Rejected invalid age:', parsed.updates.age);
+        }
+      }
+      
+      // Validate nghề nghiệp
+      if (parsed.updates.occupation) {
+        const occupation = parsed.updates.occupation.toLowerCase();
+        const invalidOccupations = /^(kiki|lala|test|abc|xyz)$/i;
+        if (occupation.length < 3 || invalidOccupations.test(occupation)) {
+          delete parsed.updates.occupation;
+          console.warn('⚠️ Rejected invalid occupation:', occupation);
+        }
+      }
+      
+      // Nếu sau khi validate không còn updates nào
+      if (Object.keys(parsed.updates).length === 0) {
+        return { hasNewInfo: false };
+      }
     }
     
     return parsed;
@@ -723,19 +762,28 @@ export default async function handler(req, res) {
     
     // Kiểm tra xem message có thực sự chia sẻ thông tin cá nhân không
     const personalInfoPatterns = [
-      /tôi (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /mình (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /em (là|tên|tên là|họ|sinh năm|năm nay)\s+\w+/i,
-      /(tôi|mình|em)\s+(làm|học|sống ở|ở|đang)\s+\w+/i,
-      /(tôi|mình|em)\s+(thích|ghét|yêu|đam mê)\s+\w+/i,
-      /tuổi của (tôi|mình|em)/i,
-      /(tôi|mình|em)\s+\d+\s+tuổi/i,
-    ];
-    
+  // Tên phải viết hoa chữ cái đầu, ít nhất 2 ký tự
+  /(?:tôi|mình|em)\s+(?:là|tên là|tên|họ)\s+([A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{1,}\s*){1,3}/i,
+  
+  // Tuổi phải từ 10-90
+  /(?:tôi|mình|em)\s+(?:năm nay\s+)?([1-9]\d?)\s+tuổi/i,
+  
+  // Nghề nghiệp thực tế
+  /(?:tôi|mình|em)\s+(?:là|làm)\s+(kỹ sư|bác sĩ|giáo viên|lập trình viên|developer|dev|sinh viên|học sinh|nhân viên|quản lý|designer|kinh doanh|marketing|engineer|teacher|student|doctor)/i,
+  
+  // Địa danh thật
+  /(?:tôi|mình|em)\s+(?:sống ở|ở|đang ở)\s+(Hà Nội|Sài Gòn|TP\.?\s*HCM|Đà Nẵng|Hải Phòng|Cần Thơ|Huế|Nha Trang|Vũng Tàu|[A-ZÀÁẠẢÃ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{3,})/i,
+  
+  // Sở thích cụ thể
+  /(?:tôi|mình|em)\s+(?:thích|yêu|đam mê)\s+([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ\s]{3,30})/i,
+];    
     const seemsPersonalInfo = personalInfoPatterns.some(pattern => pattern.test(message));
-    const isQuestion = message.trim().endsWith('?');
-    
-    if (seemsPersonalInfo && message.length > 15 && !isQuestion) {
+const isQuestion = message.trim().endsWith('?');
+const isTooShort = message.length < 10;
+const containsNonsense = NONSENSE_WORDS.some(word => 
+  message.toLowerCase().includes(word)
+);
+if (seemsPersonalInfo && message.length > 15 && !isQuestion && !isTooShort && !containsNonsense) {
       console.log('🧠 Extracting memory from personal info...');
       const memoryExtraction = await extractMemory(message, userMemory);
       
