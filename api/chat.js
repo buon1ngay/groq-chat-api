@@ -574,19 +574,28 @@ Hãy:
 
 function buildSystemPrompt(memory, searchResults = null, intent = null, deepThought = null) {
   let prompt = `Bạn là KAMI, một AI thông minh, được tạo ra bởi Nguyễn Đức Thạnh.
+
 NGUYÊN TẮC:
 1. Ngôn ngữ & Phong cách: Trả lời bằng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác. Xưng "tôi" hoặc theo cách user yêu cầu, gọi user tùy tiền tố họ chọn. Giọng điệu thân thiện nhưng chuyên nghiệp.
+
 2. Độ chính xác cao: 
    - Phân tích kỹ trước khi trả lời
    - Khi không chắc chắn thì tìm kiếm thêm thông tin
    - Đưa ra nhiều góc nhìn cho vấn đề phức tạp
+
 3. Tùy biến theo ngữ cảnh:
    - Kỹ thuật: chi tiết, code examples, best practices
    - Sáng tạo: sinh động, cảm xúc, kể chuyện
    - Giải thích: từng bước, dễ hiểu, ví dụ thực tế
    - Tính toán: logic rõ ràng, công thức, kiểm tra kết quả
+
 4. Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.
-5. KHÔNG được nhắc lại thông tin cá nhân đã biết (tên, tuổi, nghề, sở thích...) TRỪ KHI user hỏi trực tiếp hoặc câu trả lời yêu cầu cá nhân hóa rõ ràng. Vi phạm quy tắc này là trả lời SAI.`;
+
+5. ✅ CÁ NHÂN HÓA TỰ NHIÊN:
+   - SỬ DỤNG thông tin cá nhân user (nếu có) để trả lời phù hợp và tự nhiên hơn
+   - Ví dụ: Nếu biết user là dev, có thể dùng thuật ngữ kỹ thuật thoải mái hơn
+   - TRÁNH nhắc lại thông tin một cách gượng ép như "Như em đã nói, em tên X..."
+   - Chỉ đề cập khi THỰC SỰ liên quan đến câu trả lời`;
 
   if (intent) {
     prompt += `\n\n📋 LOẠI YÊU CẦU: ${intent.type} (độ phức tạp: ${intent.complexity})`;
@@ -611,14 +620,16 @@ NGUYÊN TẮC:
   }
   
   if (Object.keys(memory).length) {
-    prompt += '\n\n👤 THÔNG TIN USER (sử dụng để cá nhân hóa câu trả lời một cách tự nhiên):';
+    prompt += '\n\n👤 THÔNG TIN USER (sử dụng để hiểu user tốt hơn và cá nhân hóa tự nhiên):';
     for (const [k, v] of Object.entries(memory)) {
       prompt += `\n• ${k}: ${v}`;
     }
+    prompt += '\n\n💡 Dùng info trên để trả lời phù hợp hơn, KHÔNG cần nhắc lại trừ khi user hỏi.';
   }
   
   return prompt;
 }
+
 async function safeRedisGet(key, defaultValue = null) {
   try {
     const data = await redisWithTimeout(redis.get(key));
@@ -630,6 +641,7 @@ async function safeRedisGet(key, defaultValue = null) {
     return defaultValue;
   }
 }
+
 async function safeRedisSet(key, value, expirySeconds = null) {
   try {
     const stringified = typeof value === 'string' ? value : JSON.stringify(value);
@@ -644,6 +656,107 @@ async function safeRedisSet(key, value, expirySeconds = null) {
     return false;
   }
 }
+
+async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
+  console.log('💾 Attempting to save memory...');
+  console.log('Old memory:', JSON.stringify(oldMemory));
+  console.log('New memory:', JSON.stringify(newMemory));
+  
+  if (!newMemory || typeof newMemory !== 'object') {
+    console.error('❌ Invalid memory object');
+    return false;
+  }
+  
+  const saved = await safeRedisSet(memoryKey, newMemory, 7776000);
+  
+  if (!saved) {
+    console.error('❌ Failed to save to Redis');
+    return false;
+  }
+  
+  const verified = await safeRedisGet(memoryKey);
+  
+  if (!verified) {
+    console.error('❌ Memory verification failed - not found in Redis');
+    return false;
+  }
+  
+  const verifiedKeys = Object.keys(verified);
+  const expectedKeys = Object.keys(newMemory);
+  
+  if (verifiedKeys.length !== expectedKeys.length) {
+    console.error('❌ Memory verification failed - key count mismatch');
+    console.error('Expected:', expectedKeys);
+    console.error('Got:', verifiedKeys);
+    return false;
+  }
+  
+  console.log('✅ Memory saved and verified successfully');
+  return true;
+}
+
+async function shouldExtractMemory(message) {
+  const SKIP_PATTERNS = [
+    /^(hi|hello|chào|hey|xin chào|ok|oke|okee|được|rồi|cảm ơn|thanks|bye)$/i,
+    /^(hehe|haha|hihi|lol|lmao)$/i,
+  ];
+  
+  if (SKIP_PATTERNS.some(p => p.test(message.trim()))) {
+    return false;
+  }
+  
+  const NONSENSE_WORDS = ['kiki', 'lala', 'lolo', 'baba', 'test123', 'asdfgh'];
+  const words = message.toLowerCase().split(/\s+/);
+  const nonsenseCount = words.filter(w => NONSENSE_WORDS.includes(w)).length;
+  
+  if (nonsenseCount > words.length * 0.5) {
+    return false;
+  }
+  
+  const PERSONAL_INDICATORS = [
+    /(?:tôi|mình|em|con)\s+(?:là|tên|họ|năm nay|tuổi)/i,
+    /(?:tôi|mình|em)\s+(?:làm|học|sống ở|ở|thích|yêu|đam mê)/i,
+    /(?:nghề|công việc|job|occupation)\s+(?:của\s+)?(?:tôi|mình|em)/i,
+    /(?:sở thích|hobby|hobbies)\s+(?:của\s+)?(?:tôi|mình|em)/i,
+  ];
+  
+  return PERSONAL_INDICATORS.some(p => p.test(message));
+}
+
+async function recoverMemoryIfNeeded(userId, conversationHistory) {
+  const memoryKey = `memory:${userId}`;
+  const memory = await safeRedisGet(memoryKey);
+  
+  if (memory && Object.keys(memory).length > 0) {
+    return memory;
+  }
+  
+  console.log('🔄 Attempting memory recovery from conversation history...');
+  
+  const personalMessages = conversationHistory
+    .filter(msg => msg.role === 'user')
+    .map(msg => msg.content)
+    .join('\n');
+  
+  if (personalMessages.length < 10) {
+    return {};
+  }
+  
+  try {
+    const recovered = await extractMemory(personalMessages, {});
+    
+    if (recovered.hasNewInfo && recovered.updates) {
+      await saveMemoryWithValidation(memoryKey, recovered.updates, {});
+      console.log('✅ Memory recovered:', recovered.updates);
+      return recovered.updates;
+    }
+  } catch (e) {
+    console.warn('⚠️ Memory recovery failed:', e?.message);
+  }
+  
+  return {};
+}
+
 async function summarizeHistory(history) {
   if (history.length < 15) return history;
   
@@ -676,6 +789,7 @@ async function summarizeHistory(history) {
     return history.slice(-12);
   }
 }
+
 const metrics = {
   totalRequests: 0,
   searchCalls: 0,
@@ -684,6 +798,7 @@ const metrics = {
   avgResponseTime: 0,
   lastReset: Date.now()
 };
+
 function updateMetrics(type, value = 1) {
   metrics[type] = (metrics[type] || 0) + value;
   if (Date.now() - metrics.lastReset > 3600000) {
@@ -773,6 +888,7 @@ export default async function handler(req, res) {
       conversationHistory = await safeRedisGet(chatKey, []);
       userMemory = await safeRedisGet(memoryKey, {});
     }
+    
     if (!Array.isArray(conversationHistory)) {
       console.warn('⚠️ Invalid history format (not array), resetting');
       conversationHistory = [];
@@ -785,10 +901,15 @@ export default async function handler(req, res) {
         return true;
       });
     }
+    
     if (typeof userMemory !== 'object' || userMemory === null || Array.isArray(userMemory)) {
       console.warn('⚠️ Invalid memory format, resetting');
       userMemory = {};
     }
+    
+    console.log('📖 Loaded memory:', JSON.stringify(userMemory));
+    
+    userMemory = await recoverMemoryIfNeeded(userId, conversationHistory);
     
     const intent = await analyzeIntent(sanitizedMessage, conversationHistory);
     console.log('🎯 Intent detected:', intent);
@@ -798,9 +919,10 @@ export default async function handler(req, res) {
     }
     conversationHistory.push({ role: 'user', content: sanitizedMessage });
     
-     if (conversationHistory.length > 30) {
+    if (conversationHistory.length > 30) {
       conversationHistory = await summarizeHistory(conversationHistory);
     }
+    
     let searchResults = null;
     let usedSearch = false;
     let searchKeywords = null;
@@ -850,44 +972,32 @@ export default async function handler(req, res) {
     if (usedSearch === false && intent.needsSearch && !searchResults) {
       assistantMessage = "⚠️ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
     }
+    
     let memoryUpdated = false;
     
-    const NONSENSE_WORDS = [
-      'kiki', 'lala', 'lolo', 'baba', 'kaka', 'bibi', 'xixi', 
-      'test', 'abc', 'xyz', '123', 'aaa', 'bbb', 'ccc',
-      'asdf', 'qwer', 'zxcv', 'haha', 'hihi', 'hoho', 'hehe',
-      'aaaa', 'bbbb', 'xxxx', 'yyyy', 'zzzz'
-    ];
-    
-    const personalInfoPatterns = [
-      /(?:tôi|mình|em)\s+(?:là|tên là|tên|họ)\s+([A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{1,}\s*){1,3}/i,
-      /(?:tôi|mình|em|con|cháu|bố|mẹ|anh|chị)\s+(?:của\s+)?(?:tôi|mình|em)?\s+(?:năm nay\s+)?(\d+)\s+tuổi/i,
-      /(?:tôi|mình|em)\s+(?:là|làm)\s+(kỹ sư|bác sĩ|giáo viên|lập trình viên|developer|dev|sinh viên|học sinh|nhân viên|quản lý|designer|kinh doanh|marketing|engineer|teacher|student|doctor)/i,
-      /(?:tôi|mình|em)\s+(?:sống ở|ở|đang ở)\s+(Hà Nội|Sài Gòn|TP\.?\s*HCM|Đà Nẵng|Hải Phòng|Cần Thơ|Huế|Nha Trang|Vũng Tàu|[A-ZÀÁẠẢÃ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{3,})/i,
-      /(?:tôi|mình|em)\s+(?:thích|yêu|đam mê)\s+([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ\s]{3,30})/i,
-    ];
-    
-    const seemsPersonalInfo = personalInfoPatterns.some(pattern => pattern.test(sanitizedMessage));
-    const isQuestion = sanitizedMessage.trim().endsWith('?');
-    const isTooShort = sanitizedMessage.length < 10;
-    const containsNonsense = NONSENSE_WORDS.some(word => 
-      sanitizedMessage.toLowerCase().includes(word)
-    );
-    
-    if (seemsPersonalInfo && sanitizedMessage.length > 15 && !isQuestion && !isTooShort && !containsNonsense) {
-      console.log('🧠 Extracting memory from personal info...');
+    const shouldExtract = await shouldExtractMemory(sanitizedMessage);
+
+    if (shouldExtract) {
+      console.log('🧠 Extracting memory from message...');
       const memoryExtraction = await extractMemory(sanitizedMessage, userMemory);
       
       if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
         const oldMemoryCount = Object.keys(userMemory).length;
-        userMemory = { ...userMemory, ...memoryExtraction.updates };
-        const newMemoryCount = Object.keys(userMemory).length;
+        const newMemory = { ...userMemory, ...memoryExtraction.updates };
         
-        await safeRedisSet(memoryKey, userMemory, 7776000);
-        memoryUpdated = true;
+        const saved = await saveMemoryWithValidation(memoryKey, newMemory, userMemory);
         
-        console.log(`✅ Memory updated: ${oldMemoryCount} → ${newMemoryCount} items`);
-        console.log('New info:', memoryExtraction.updates);
+        if (saved) {
+          userMemory = newMemory;
+          memoryUpdated = true;
+          
+          const newMemoryCount = Object.keys(userMemory).length;
+          console.log(`✅ Memory updated: ${oldMemoryCount} → ${newMemoryCount} items`);
+          console.log('New info:', memoryExtraction.updates);
+        } else {
+          console.error('❌ Memory update failed');
+          memoryUpdated = false;
+        }
       }
     }
 
