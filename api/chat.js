@@ -444,7 +444,6 @@ async function extractMemory(message, currentMemory) {
 TIN NHẮN: "${message}"
 
 THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
-
 Quy tắc BẮT BUỘC - ĐỌC KỸ:
 1. TÊN: 
    - CHỈ lưu tên thật có ít nhất 2 ký tự, viết hoa chữ cái đầu
@@ -572,7 +571,7 @@ Hãy:
 }
 
 function buildSystemPrompt(memory, searchResults = null, intent = null, deepThought = null) {
-  let prompt = `Bạn là KAMI, một AI thông minh, chính xác và có tư duy, được tạo ra bởi Nguyễn Đức Thạnh.
+  let prompt = `Bạn là KAMI, một AI thông minh, được tạo ra bởi Nguyễn Đức Thạnh.
 NGUYÊN TẮC:
 1. Ngôn ngữ & Phong cách: Trả lời bằng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác. Xưng "tôi" hoặc theo cách user yêu cầu, gọi user tùy tiền tố họ chọn. Giọng điệu thân thiện nhưng chuyên nghiệp.
 2. Độ chính xác cao: 
@@ -584,8 +583,8 @@ NGUYÊN TẮC:
    - Sáng tạo: sinh động, cảm xúc, kể chuyện
    - Giải thích: từng bước, dễ hiểu, ví dụ thực tế
    - Tính toán: logic rõ ràng, công thức, kiểm tra kết quả
-4. Emoji & Format: Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.
-5. GHI NHỚ TỰ NHIÊN: Khi user chia sẻ thông tin cá nhân (tên, tuổi, nghề nghiệp, sở thích, mối quan hệ...), hãy ghi nhớ một cách tự nhiên KHÔNG cần thông báo rõ ràng. Chỉ nói "Mình biết rồi", "Ok mình nhớ rồi" một cách nhẹ nhàng.`;
+4. Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.
+5. KHÔNG được nhắc lại thông tin cá nhân đã biết (tên, tuổi, nghề, sở thích...) TRỪ KHI user hỏi trực tiếp hoặc câu trả lời yêu cầu cá nhân hóa rõ ràng. Vi phạm quy tắc này là trả lời SAI.`;
 
   if (intent) {
     prompt += `\n\n📋 LOẠI YÊU CẦU: ${intent.type} (độ phức tạp: ${intent.complexity})`;
