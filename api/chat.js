@@ -46,8 +46,7 @@ if (API_KEYS.length === 0) throw new Error('❌ Không tìm thấy GROQ_API_KEY!
 
 console.log(`🔑 Load ${API_KEYS.length} GROQ API keys`);
 console.log(`🤖 Models: Main=${MODELS.main}, Search=${MODELS.search}, Memory=${MODELS.memory}`);
-
-let lastGroqKeyIndex = -1;
+let lastGroqKeyIndex = Math.floor(Math.random() * API_KEYS.length) - 1;
 function createGroqClient() {
   lastGroqKeyIndex = (lastGroqKeyIndex + 1) % API_KEYS.length;
   return new Groq({ apiKey: API_KEYS[lastGroqKeyIndex] });
@@ -140,10 +139,10 @@ const SEARCH_APIS = [
 
 console.log(`🔍 Load ${SEARCH_APIS.length} Search APIs: ${SEARCH_APIS.map(a => a.name).join(', ')}`);
 
-let lastSearchApiIndex = -1;
+// Khởi tạo random để phân tải đều
+let lastSearchApiIndex = Math.floor(Math.random() * SEARCH_APIS.length) - 1;
 // FIX: Lưu Promise thay vì boolean để tránh race condition
 const inFlightSearches = {};
-
 async function extractSearchKeywords(message) {
   try {
     const response = await callGroqWithRetry({
@@ -801,4 +800,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-}
+        }
