@@ -451,8 +451,9 @@ Quy tắc BẮT BUỘC - ĐỌC KỸ:
    - Ví dụ HỢP LỆ: Minh, An, Tuấn, Ngọc, Ly
    - Ví dụ KHÔNG HỢP LỆ: kiki, lolo, abc, test123
 2. TUỔI: 
-   - CHỈ lưu số từ 01-90
-   - KHÔNG lưu tuổi vô lý như 100, 200
+   - Chấp nhận mọi tuổi từ 0-120 (bao gồm cả tuổi trẻ em, người già)
+   - CHỈ chặn số hoàn toàn vô lý như số âm hoặc >150
+   - Ví dụ HỢP LỆ: "Tôi 25 tuổi", "Con tôi 3 tuổi", "Bố mình 70 tuổi"
 3. NGHỀ NGHIỆP: 
    - CHỈ lưu nghề thực tế: lập trình viên, bác sĩ, sinh viên, giáo viên, nhân viên...
    - KHÔNG lưu mô tả chung hoặc từ vô nghĩa
@@ -467,6 +468,7 @@ Ví dụ HỢP LỆ - CẦN lưu:
 ✅ "Mình là dev ở HN" → {"occupation": "Developer", "location": "Hà Nội"}
 ✅ "Em thích đọc sách" → {"hobbies": "đọc sách"}
 ✅ "Tôi tên Ly, 22 tuổi" → {"name": "Ly", "age": 22}
+✅ "Con tôi 3 tuổi" → {"childAge": 3}
 Ví dụ KHÔNG HỢP LỆ - KHÔNG lưu:
 ❌ "Tôi tên kiki" → TÊN VÔ NGHĨA
 ❌ "Tôi là lala" → TỪ VÔ NGHĨA
@@ -511,15 +513,15 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
           console.warn('⚠️ Rejected invalid name:', parsed.updates.name);
         }
       }
+      
       if (parsed.updates.age) {
         const age = parseInt(parsed.updates.age);
-        if (isNaN(age) || age < 10 || age > 90) {
+        if (isNaN(age) || age < 0 || age > 150) {
           delete parsed.updates.age;
           console.warn('⚠️ Rejected invalid age:', parsed.updates.age);
         }
       }
       
-      // Validate nghề nghiệp
       if (parsed.updates.occupation) {
         const occupation = parsed.updates.occupation.toLowerCase();
         const invalidOccupations = /^(kiki|lala|test|abc|xyz|admin|user)$/i;
@@ -585,12 +587,10 @@ NGUYÊN TẮC:
    - Tính toán: logic rõ ràng, công thức, kiểm tra kết quả
 4. Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.
 5. KHÔNG được nhắc lại thông tin cá nhân đã biết (tên, tuổi, nghề, sở thích...) TRỪ KHI user hỏi trực tiếp hoặc câu trả lời yêu cầu cá nhân hóa rõ ràng. Vi phạm quy tắc này là trả lời SAI.`;
-
   if (intent) {
     prompt += `\n\n📋 LOẠI YÊU CẦU: ${intent.type} (độ phức tạp: ${intent.complexity})`;
-    
     if (intent.type === 'technical') {
-      prompt += '\n💡 Chế độ kỹ thuật: Cung cấp code examples, giải thích chi tiết, đề xuất best practices.';
+prompt += '\n💡 Chế độ kỹ thuật: Cung cấp code examples, giải thích chi tiết, đề xuất best practices.';
     } else if (intent.type === 'creative') {
       prompt += '\n🎨 Chế độ sáng tạo: Tập trung vào tính sinh động, cảm xúc, chi tiết miêu tả.';
     } else if (intent.type === 'explanation') {
@@ -730,7 +730,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Tin nhắn là bắt buộc và phải là chuỗi ký tự' });
     }
     
-    // FIX: Sanitize input
     const sanitizedMessage = sanitizeMessage(message);
     
     if (!sanitizedMessage || sanitizedMessage.length < 1) {
@@ -761,7 +760,6 @@ export default async function handler(req, res) {
       }
       if (!conversationHistory) conversationHistory = [];
       
-      // Parse memory
       userMemory = memoryData;
       if (typeof memoryData === 'string') {
         try { userMemory = JSON.parse(memoryData); } catch { userMemory = {}; }
@@ -793,7 +791,6 @@ export default async function handler(req, res) {
     const intent = await analyzeIntent(sanitizedMessage, conversationHistory);
     console.log('🎯 Intent detected:', intent);
 
-    // FIX: Validate trước khi push
     if (!Array.isArray(conversationHistory)) {
       conversationHistory = [];
     }
@@ -848,7 +845,6 @@ export default async function handler(req, res) {
     
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
     
-    // FIX: Graceful degradation khi search fail nhưng vẫn trả lời được
     if (usedSearch === false && intent.needsSearch && !searchResults) {
       assistantMessage = "⚠️ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
     }
@@ -863,7 +859,7 @@ export default async function handler(req, res) {
     
     const personalInfoPatterns = [
       /(?:tôi|mình|em)\s+(?:là|tên là|tên|họ)\s+([A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{1,}\s*){1,3}/i,
-      /(?:tôi|mình|em)\s+(?:năm nay\s+)?([1-9]\d?)\s+tuổi/i,
+      /(?:tôi|mình|em|con|cháu|bố|mẹ|anh|chị)\s+(?:của\s+)?(?:tôi|mình|em)?\s+(?:năm nay\s+)?(\d+)\s+tuổi/i,
       /(?:tôi|mình|em)\s+(?:là|làm)\s+(kỹ sư|bác sĩ|giáo viên|lập trình viên|developer|dev|sinh viên|học sinh|nhân viên|quản lý|designer|kinh doanh|marketing|engineer|teacher|student|doctor)/i,
       /(?:tôi|mình|em)\s+(?:sống ở|ở|đang ở)\s+(Hà Nội|Sài Gòn|TP\.?\s*HCM|Đà Nẵng|Hải Phòng|Cần Thơ|Huế|Nha Trang|Vũng Tàu|[A-ZÀÁẠẢÃ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]{3,})/i,
       /(?:tôi|mình|em)\s+(?:thích|yêu|đam mê)\s+([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ\s]{3,30})/i,
@@ -885,7 +881,7 @@ export default async function handler(req, res) {
         userMemory = { ...userMemory, ...memoryExtraction.updates };
         const newMemoryCount = Object.keys(userMemory).length;
         
-        await safeRedisSet(memoryKey, userMemory, 7776000); // 90 ngày
+        await safeRedisSet(memoryKey, userMemory, 7776000);
         memoryUpdated = true;
         
         console.log(`✅ Memory updated: ${oldMemoryCount} → ${newMemoryCount} items`);
@@ -894,7 +890,7 @@ export default async function handler(req, res) {
     }
 
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
-    await safeRedisSet(chatKey, conversationHistory, 7776000); // 90 ngày
+    await safeRedisSet(chatKey, conversationHistory, 7776000);
     
     const responseTime = Date.now() - startTime;
     updateMetrics('avgResponseTime', responseTime);
