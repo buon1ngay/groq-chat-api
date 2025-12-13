@@ -333,7 +333,7 @@ async function needsWebSearch(message, intent) {
     /năm (19|20)\d{2}/i,
     /mới nhất|gần đây|vừa rồi|hôm (nay|qua)|tuần (này|trước)|tháng (này|trước)/i,
     /giá|tỷ giá|bao nhiêu tiền|chi phí/i,
-    /tin tức|sự kiện|cập nhật|thông tin|news|update/i,
+    /tin tức|sự kiện|cập nhật|thông tin/i,
     /ai là|ai đã|là ai|người nào/i,
     /khi nào|lúc nào|bao giờ|thời gian/i,
     /ở đâu|chỗ nào|tại đâu|địa điểm/i,
@@ -512,7 +512,7 @@ NGUYÊN TẮC:
    - Giải thích: từng bước, dễ hiểu, ví dụ thực tế
    - Tính toán: logic rõ ràng, công thức, kiểm tra kết quả
 4. Emoji & Format: Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.
-5. GHI NHỚ TỰ NHIÊN: Khi user chia sẻ thông tin cá nhân (tên, tuổi, nghề nghiệp, sở thích, mối quan hệ...), hãy ghi nhớ một cách tự nhiên KHÔNG cần thông báo rõ ràng. Chỉ nói "Được rồi", "Ok mình nhớ rồi" một cách nhẹ nhàng.`;
+5. GHI NHỚ TỰ NHIÊN: Khi user chia sẻ thông tin cá nhân (tên, tuổi, nghề nghiệp, sở thích, mối quan hệ...), hãy ghi nhớ một cách tự nhiên KHÔNG cần thông báo rõ ràng. Chỉ nói "Mình biết rồi", "Ok mình nhớ rồi" một cách nhẹ nhàng.`;
 
   if (intent) {
     prompt += `\n\n📋 LOẠI YÊU CẦU: ${intent.type} (độ phức tạp: ${intent.complexity})`;
@@ -570,8 +570,6 @@ async function safeRedisSet(key, value, expirySeconds = null) {
     return false;
   }
 }
-
-// FIX: Giảm threshold xuống 15 messages và cải thiện summarization
 async function summarizeHistory(history) {
   if (history.length < 15) return history;
   
@@ -736,11 +734,6 @@ export default async function handler(req, res) {
     ];
     
     const seemsPersonalInfo = personalInfoPatterns.some(pattern => pattern.test(message));
-    
-    // Chỉ extract memory khi:
-    // 1. Message dài hơn 15 ký tự (loại bỏ "ok", "ừ", "vâng"...)
-    // 2. Có pattern chia sẻ thông tin cá nhân
-    // 3. Không phải câu hỏi đơn thuần
     const isQuestion = message.trim().endsWith('?');
     
     if (seemsPersonalInfo && message.length > 15 && !isQuestion) {
@@ -791,7 +784,7 @@ export default async function handler(req, res) {
     let statusCode = 500;
     
     if (error.message?.includes('rate_limit')) {
-      errMsg = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau 1 phút.';
+      errMsg = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau.';
       statusCode = 429;
     } else if (error.message?.includes('Request quá lớn')) {
       statusCode = 413;
