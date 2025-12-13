@@ -587,10 +587,12 @@ NGUYÊN TẮC:
    - Tính toán: logic rõ ràng, công thức, kiểm tra kết quả
 4. Dùng emoji tiết chế để tạo không khí thân thiện. Tránh format quá mức trừ khi được yêu cầu.
 5. KHÔNG được nhắc lại thông tin cá nhân đã biết (tên, tuổi, nghề, sở thích...) TRỪ KHI user hỏi trực tiếp hoặc câu trả lời yêu cầu cá nhân hóa rõ ràng. Vi phạm quy tắc này là trả lời SAI.`;
+
   if (intent) {
     prompt += `\n\n📋 LOẠI YÊU CẦU: ${intent.type} (độ phức tạp: ${intent.complexity})`;
+    
     if (intent.type === 'technical') {
-prompt += '\n💡 Chế độ kỹ thuật: Cung cấp code examples, giải thích chi tiết, đề xuất best practices.';
+      prompt += '\n💡 Chế độ kỹ thuật: Cung cấp code examples, giải thích chi tiết, đề xuất best practices.';
     } else if (intent.type === 'creative') {
       prompt += '\n🎨 Chế độ sáng tạo: Tập trung vào tính sinh động, cảm xúc, chi tiết miêu tả.';
     } else if (intent.type === 'explanation') {
