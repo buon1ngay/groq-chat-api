@@ -238,10 +238,13 @@ async function searchWeb(query) {
   const cleanedQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanedQuery}`;
   
+  // 🔧 FIX: Check in-flight to prevent duplicate searches
   if (inFlightSearches[cleanedQuery]) {
     try {
+      console.log('⏳ Waiting for existing search to complete...');
       return await inFlightSearches[cleanedQuery];
     } catch (e) {
+      delete inFlightSearches[cleanedQuery]; // Cleanup on error
       return null;
     }
   }
@@ -434,7 +437,19 @@ function isValidName(name) {
   return true;
 }
 
+// 🔧 OPTIMIZATION: Debounce memory extraction để tránh gọi quá nhiều
 async function extractMemory(message, currentMemory) {
+  const cacheKey = `${message.substring(0, 100)}:${Object.keys(currentMemory).length}`;
+  
+  // Check debounce
+  if (memoryExtractionDebounce.has(cacheKey)) {
+    const cached = memoryExtractionDebounce.get(cacheKey);
+    if (Date.now() - cached.timestamp < 5000) { // 5s debounce
+      console.log('⚡ Using debounced memory extraction');
+      return cached.result;
+    }
+  }
+  
   try {
     const prompt = `Phân tích tin nhắn và trích xuất CHỈ những thông tin CÁ NHÂN THỰC SỰ của user.
 
@@ -498,12 +513,18 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
     const content = response.choices[0]?.message?.content || '{}';
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     
-    if (!jsonMatch) return { hasNewInfo: false };
+    if (!jsonMatch) {
+      const result = { hasNewInfo: false };
+      memoryExtractionDebounce.set(cacheKey, { result, timestamp: Date.now() });
+      return result;
+    }
     
     const parsed = JSON.parse(jsonMatch[0]);
     
     if (parsed.hasNewInfo && !parsed.updates) {
-      return { hasNewInfo: false };
+      const result = { hasNewInfo: false };
+      memoryExtractionDebounce.set(cacheKey, { result, timestamp: Date.now() });
+      return result;
     }
     
     if (parsed.hasNewInfo && parsed.updates) {
@@ -533,8 +554,20 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
       }
       
       if (Object.keys(parsed.updates).length === 0) {
-        return { hasNewInfo: false };
+        const result = { hasNewInfo: false };
+        memoryExtractionDebounce.set(cacheKey, { result, timestamp: Date.now() });
+        return result;
       }
+    }
+    
+    // Cache result
+    memoryExtractionDebounce.set(cacheKey, { result: parsed, timestamp: Date.now() });
+    
+    // Cleanup old cache
+    if (memoryExtractionDebounce.size > 50) {
+      const entries = Array.from(memoryExtractionDebounce.entries());
+      const sorted = entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+      sorted.slice(0, 25).forEach(([key]) => memoryExtractionDebounce.delete(key));
     }
     
     return parsed;
@@ -569,6 +602,7 @@ Hãy:
     
     return response.choices[0]?.message?.content || null;
   } catch (e) {
+    console.error('❌ deepThinking error:', e);
     return null;
   }
 }
@@ -661,7 +695,7 @@ async function safeRedisSet(key, value, expirySeconds = null) {
   }
 }
 
-// 🔧 FIX: Improved validation và logging
+// 🔧 FIX: Improved validation và logging với error handling
 async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
   if (!newMemory || typeof newMemory !== 'object') {
     console.error('❌ Invalid memory object');
@@ -676,34 +710,68 @@ async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
   
   console.log(`💾 Saving memory for key ${memoryKey}:`, JSON.stringify(newMemory));
   
-  const saved = await safeRedisSet(memoryKey, newMemory, 31536000); // 🔧 FIX: 1 năm TTL thay vì 90 ngày
-  
-  if (!saved) {
-    console.error('❌ Failed to save to Redis');
+  try {
+    const saved = await safeRedisSet(memoryKey, newMemory, 31536000); // 🔧 FIX: 1 năm TTL thay vì 90 ngày
+    
+    if (!saved) {
+      console.error('❌ Failed to save to Redis');
+      return false;
+    }
+    
+    // 🔧 FIX: Đợi một chút để Redis commit
+    await new Promise(r => setTimeout(r, 100));
+    
+    const verified = await safeRedisGet(memoryKey);
+    if (!verified) {
+      console.error('❌ Memory verification failed - not found in Redis');
+      return false;
+    }  
+    
+    const verifiedKeys = Object.keys(verified);
+    const expectedKeys = Object.keys(newMemory);  
+    
+    if (verifiedKeys.length !== expectedKeys.length) {
+      console.error('❌ Memory verification failed - key count mismatch');
+      console.error('Expected:', expectedKeys);
+      console.error('Got:', verifiedKeys);
+      return false;
+    }
+    
+    console.log(`✅ Memory saved and verified successfully`);
+    return true;
+  } catch (e) {
+    console.error('❌ saveMemoryWithValidation error:', e);
     return false;
   }
-  
-  // 🔧 FIX: Đợi một chút để Redis commit
-  await new Promise(r => setTimeout(r, 100));
-  
-  const verified = await safeRedisGet(memoryKey);
-  if (!verified) {
-    console.error('❌ Memory verification failed - not found in Redis');
-    return false;
-  }  
-  
-  const verifiedKeys = Object.keys(verified);
-  const expectedKeys = Object.keys(newMemory);  
-  
-  if (verifiedKeys.length !== expectedKeys.length) {
-    console.error('❌ Memory verification failed - key count mismatch');
-    console.error('Expected:', expectedKeys);
-    console.error('Got:', verifiedKeys);
-    return false;
+}
+
+// 🔧 FIX: Remove unnecessary async (no await inside)
+function mergeMemories(oldMemory, newUpdates) {
+  if (!oldMemory || typeof oldMemory !== 'object') {
+    oldMemory = {};
+  }
+  if (!newUpdates || typeof newUpdates !== 'object') {
+    return oldMemory;
   }
   
-  console.log(`✅ Memory saved and verified successfully`);
-  return true;
+  const merged = { ...oldMemory };
+  
+  for (const [key, value] of Object.entries(newUpdates)) {
+    // Skip null/undefined values
+    if (value === null || value === undefined) {
+      continue;
+    }
+    
+    // Skip empty strings
+    if (typeof value === 'string' && value.trim().length === 0) {
+      continue;
+    }
+    
+    // Update value
+    merged[key] = value;
+  }
+  
+  return merged;
 }
 
 async function shouldExtractMemory(message) {
@@ -775,8 +843,45 @@ async function recoverMemoryIfNeeded(userId, conversationHistory) {
   return {};
 }
 
-async function summarizeHistory(history) {
+// 🔧 FIX: Import missing dependencies và constants
+const summaryCache = new Map();
+const memoryExtractionDebounce = new Map();
+
+// 🔧 OPTIMIZATION: Periodic cleanup cho caches
+setInterval(() => {
+  const now = Date.now();
+  
+  // Cleanup summary cache (remove entries older than 1 hour)
+  for (const [key, value] of summaryCache.entries()) {
+    if (!value._timestamp) {
+      summaryCache.delete(key);
+    } else if (now - value._timestamp > 3600000) {
+      summaryCache.delete(key);
+    }
+  }
+  
+  // Cleanup memory extraction debounce (remove expired entries)
+  for (const [key, value] of memoryExtractionDebounce.entries()) {
+    if (now - value.timestamp > 10000) { // 10s grace period
+      memoryExtractionDebounce.delete(key);
+    }
+  }
+  
+  console.log(`🧹 Cache cleanup: summary=${summaryCache.size}, debounce=${memoryExtractionDebounce.size}`);
+}, 300000); // Every 5 minutes
+
+// 🔧 OPTIMIZATION: Cache summary để tránh re-summarize
+async function summarizeHistory(history, userId, conversationId) {
   if (history.length < 15) return history;
+  
+  const cacheKey = `${userId}:${conversationId}:${history.length}`;
+  if (summaryCache.has(cacheKey)) {
+    const cached = summaryCache.get(cacheKey);
+    if (cached && cached._timestamp && Date.now() - cached._timestamp < 3600000) {
+      console.log('✅ Using cached summary');
+      return cached.data;
+    }
+  }
   
   try {
     const oldMessages = history.slice(0, -10);
@@ -801,10 +906,43 @@ async function summarizeHistory(history) {
       };
     }
     
+    // Cache summary with timestamp
+    summaryCache.set(cacheKey, {
+      data: recentMessages,
+      _timestamp: Date.now()
+    });
+    
+    // Cleanup old cache (keep last 100)
+    if (summaryCache.size > 100) {
+      const entries = Array.from(summaryCache.entries());
+      const sorted = entries.sort((a, b) => (a[1]._timestamp || 0) - (b[1]._timestamp || 0));
+      sorted.slice(0, 50).forEach(([key]) => summaryCache.delete(key));
+    }
+    
     return recentMessages;
   } catch (e) {
+    console.error('❌ Summary failed:', e);
     return history.slice(-12);
   }
+}
+
+// 🔧 OPTIMIZATION: Batch Redis operations để giảm latency
+async function batchSaveData(operations) {
+  if (!operations || operations.length === 0) {
+    console.warn('⚠️ No operations to save');
+    return [];
+  }
+  
+  const promises = operations.map(async ({ key, value, ttl }) => {
+    try {
+      return await safeRedisSet(key, value, ttl);
+    } catch (e) {
+      console.error(`❌ Failed to save ${key}:`, e);
+      return false;
+    }
+  });
+  
+  return await Promise.all(promises);
 }
 
 const metrics = {
@@ -813,6 +951,7 @@ const metrics = {
   cacheHits: 0,
   errors: 0,
   avgResponseTime: 0,
+  memoryUpdates: 0,
   lastReset: Date.now()
 };
 
@@ -861,6 +1000,15 @@ export default async function handler(req, res) {
     
     const { message, userId = 'default', conversationId = 'default' } = req.body;
     
+    // 🔧 FIX: Validate and sanitize userId and conversationId
+    const sanitizedUserId = (userId && typeof userId === 'string') 
+      ? userId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 100) || 'default'
+      : 'default';
+      
+    const sanitizedConversationId = (conversationId && typeof conversationId === 'string')
+      ? conversationId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 100) || 'default'
+      : 'default';
+    
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Tin nhắn là bắt buộc và phải là chuỗi ký tự' });
     }
@@ -876,7 +1024,7 @@ export default async function handler(req, res) {
     }
     
     try {
-      checkRateLimit(userId);
+      checkRateLimit(sanitizedUserId);
     } catch (e) {
       return res.status(429).json({ 
         error: e?.message || 'Rate limit exceeded',
@@ -884,8 +1032,8 @@ export default async function handler(req, res) {
       });
     }
 
-    const chatKey = `chat:${userId}:${conversationId}`;
-    const memoryKey = `memory:${userId}`;
+    const chatKey = `chat:${sanitizedUserId}:${sanitizedConversationId}`;
+    const memoryKey = `memory:${sanitizedUserId}`;
     
     let conversationHistory, userMemory;
     
@@ -933,7 +1081,7 @@ export default async function handler(req, res) {
     // 🔧 FIX: CHỈ recover khi memory thực sự rỗng
     if (Object.keys(userMemory).length === 0) {
       console.log(`ℹ️ Memory is empty, checking if recovery is needed...`);
-      userMemory = await recoverMemoryIfNeeded(userId, conversationHistory);
+      userMemory = await recoverMemoryIfNeeded(sanitizedUserId, conversationHistory);
     } else {
       console.log(`✅ Using existing memory with ${Object.keys(userMemory).length} keys:`, JSON.stringify(userMemory));
     }
@@ -943,10 +1091,12 @@ export default async function handler(req, res) {
     if (!Array.isArray(conversationHistory)) {
       conversationHistory = [];
     }
+    
+    // 🔧 FIX: Add user message BEFORE summarizing
     conversationHistory.push({ role: 'user', content: sanitizedMessage });
     
     if (conversationHistory.length > 30) {
-      conversationHistory = await summarizeHistory(conversationHistory);
+      conversationHistory = await summarizeHistory(conversationHistory, sanitizedUserId, sanitizedConversationId);
     }
     
     let searchResults = null;
@@ -1009,28 +1159,36 @@ export default async function handler(req, res) {
       if (memoryExtraction.hasNewInfo && memoryExtraction.updates && Object.keys(memoryExtraction.updates).length > 0) {
         const oldMemoryCount = Object.keys(userMemory).length;
         
-        // 🔧 FIX: Merge cẩn thận, giữ lại old memory
-        const newMemory = { ...userMemory, ...memoryExtraction.updates };
+        // 🔧 FIX: Use safe merge function (synchronous)
+        const newMemory = mergeMemories(userMemory, memoryExtraction.updates);
         
-        console.log(`📝 Attempting to save new memory:`, JSON.stringify(newMemory));
+        // 🔧 FIX: Only save if there are actual changes
+        const hasChanges = JSON.stringify(userMemory) !== JSON.stringify(newMemory);
         
-        const saved = await saveMemoryWithValidation(memoryKey, newMemory, userMemory);
-        
-        if (saved) {
-          userMemory = newMemory;
-          memoryUpdated = true;
-          
-          const newMemoryCount = Object.keys(userMemory).length;
-          memoryUpdateDetails = {
-            added: Object.keys(memoryExtraction.updates),
-            totalKeys: newMemoryCount,
-            previousKeys: oldMemoryCount
-          };
-          
-          console.log(`✅ Memory updated successfully:`, memoryUpdateDetails);
+        if (!hasChanges) {
+          console.log(`ℹ️ No memory changes detected, skipping save`);
         } else {
-          console.error('❌ Failed to save memory');
-          memoryUpdated = false;
+          console.log(`📝 Attempting to save new memory:`, JSON.stringify(newMemory));
+          
+          const saved = await saveMemoryWithValidation(memoryKey, newMemory, userMemory);
+          
+          if (saved) {
+            userMemory = newMemory;
+            memoryUpdated = true;
+            
+            const newMemoryCount = Object.keys(userMemory).length;
+            memoryUpdateDetails = {
+              added: Object.keys(memoryExtraction.updates),
+              totalKeys: newMemoryCount,
+              previousKeys: oldMemoryCount
+            };
+            
+            console.log(`✅ Memory updated successfully:`, memoryUpdateDetails);
+            updateMetrics('memoryUpdates');
+          } else {
+            console.error('❌ Failed to save memory');
+            memoryUpdated = false;
+          }
         }
       } else {
         console.log(`ℹ️ No new memory to extract`);
@@ -1039,15 +1197,27 @@ export default async function handler(req, res) {
     
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
     
-    // 🔧 FIX: Save chat history với retry
-    const historySaved = await safeRedisSet(chatKey, conversationHistory, 31536000); // 1 năm
-    if (!historySaved) {
-      console.error('❌ Failed to save conversation history');
-    }
+    // 🔧 OPTIMIZATION: Batch save để giảm latency
+    const saveOperations = [
+      { key: chatKey, value: conversationHistory, ttl: 31536000 }
+    ];
     
     // 🔧 FIX: Refresh memory TTL mỗi lần request
     if (Object.keys(userMemory).length > 0) {
-      await safeRedisSet(memoryKey, userMemory, 31536000); // 1 năm
+      saveOperations.push({ key: memoryKey, value: userMemory, ttl: 31536000 });
+    }
+    
+    try {
+      const saveResults = await batchSaveData(saveOperations);
+      
+      if (!saveResults[0]) {
+        console.error('❌ Failed to save conversation history');
+      }
+      if (saveOperations.length > 1 && !saveResults[1]) {
+        console.error('❌ Failed to refresh memory TTL');
+      }
+    } catch (e) {
+      console.error('❌ Batch save failed:', e);
     }
     
     const responseTime = Date.now() - startTime;
@@ -1071,7 +1241,15 @@ export default async function handler(req, res) {
       model: MODELS.main,
       temperature,
       responseTime: responseTime + 'ms',
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      // 🔧 DEBUG: Chỉ trả currentMemory khi có debug flag
+      ...(process.env.DEBUG_MODE === 'true' && { 
+        currentMemory: userMemory,
+        cacheStats: {
+          summaryCache: summaryCache.size,
+          debounceCache: memoryExtractionDebounce.size
+        }
+      })
     };
 
     return res.status(200).json(metadata);
