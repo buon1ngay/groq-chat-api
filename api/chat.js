@@ -582,8 +582,13 @@ NGUYÊN TẮC:
   return prompt;
 }
 
-// 🔧 FIX: Thêm retry và better error handling
 async function safeRedisGet(key, defaultValue = null) {
+  // 🔧 FIX: Validate key
+  if (!key || typeof key !== 'string' || key.trim().length === 0) {
+    console.error('❌ Invalid Redis key:', key);
+    return defaultValue;
+  }
+  
   try {
     const data = await redisWithTimeout(redis.get(key));
     if (!data) return defaultValue;
@@ -595,8 +600,13 @@ async function safeRedisGet(key, defaultValue = null) {
   }
 }
 
-// 🔧 FIX: Thêm validation và retry
 async function safeRedisSet(key, value, expirySeconds = null) {
+  // 🔧 FIX: Validate key and value
+  if (!key || typeof key !== 'string' || key.trim().length === 0) {
+    console.error('❌ Invalid Redis key:', key);
+    return false;
+  }
+  
   if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) {
     console.warn(`⚠️ Attempted to save empty value for key ${key}`);
     return false;
@@ -889,10 +899,16 @@ export default async function handler(req, res) {
     
     let conversationHistory, userMemory;
     
-    // 🔧 FIX: Load cả 2 parallel nhưng xử lý error riêng
+    // 🔧 FIX: Load cả 2 parallel với better error handling
     try {
       const results = await redisWithTimeout(redis.mget(chatKey, memoryKey));
-      const [historyData, memoryData] = results || [null, null];
+      
+      // 🔧 FIX: Handle undefined/null results safely
+      if (!results || !Array.isArray(results)) {
+        throw new Error('Invalid mget response');
+      }
+      
+      const [historyData, memoryData] = results;
       
       conversationHistory = historyData;
       if (typeof historyData === 'string') {
@@ -1031,8 +1047,14 @@ export default async function handler(req, res) {
     
     try {
       const saveResults = await batchSaveData(saveOperations);
-      if (!saveResults[0]) console.error('❌ Failed to save history');
-      if (saveOperations.length > 1 && !saveResults[1]) console.error('❌ Failed to refresh memory TTL');
+      
+      // 🔧 FIX: Check và log từng operation result
+      if (!saveResults || saveResults.length === 0) {
+        console.error('❌ Batch save returned no results');
+      } else {
+        if (!saveResults[0]) console.error('❌ Failed to save history');
+        if (saveOperations.length > 1 && !saveResults[1]) console.error('❌ Failed to refresh memory TTL');
+      }
     } catch (e) {
       console.error('❌ Batch save failed:', e);
     }
@@ -1043,13 +1065,12 @@ export default async function handler(req, res) {
     const metadata = {
       success: true,
       message: assistantMessage,
-      userId,
-      conversationId,
+      userId: sanitizedUserId,
+      conversationId: sanitizedConversationId,
       historyLength: conversationHistory.length,
       memoryUpdated,
       memoryUpdateDetails,
       memoryCount: Object.keys(userMemory).length,
-      currentMemory: userMemory, // 🔧 FIX: Trả về memory hiện tại để debug
       usedWebSearch: usedSearch,
       searchKeywords: usedSearch ? searchKeywords : null,
       intent: intent.type,
