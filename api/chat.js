@@ -1,5 +1,6 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
+
 if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
   throw new Error('❌ Thiếu UPSTASH_REDIS_REST_URL hoặc UPSTASH_REDIS_REST_TOKEN!');
 }
@@ -8,14 +9,24 @@ const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
-async function redisWithTimeout(operation, timeoutMs = 5000) {
-  return Promise.race([
-    operation,
-    new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Redis timeout')), timeoutMs)
-    )
-  ]);
+
+// 🔧 FIX: Tăng timeout và thêm retry
+async function redisWithTimeout(operation, timeoutMs = 10000, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await Promise.race([
+        operation,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Redis timeout')), timeoutMs)
+        )
+      ]);
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Exponential backoff
+    }
+  }
 }
+
 async function checkRedisHealth() {
   try {
     await redisWithTimeout(redis.ping());
@@ -25,6 +36,7 @@ async function checkRedisHealth() {
     throw new Error('Cannot connect to Redis. Please check your credentials.');
   }
 }
+
 checkRedisHealth().catch(console.error);
 
 const API_KEYS = [
@@ -136,9 +148,11 @@ const SEARCH_APIS = [
     }
   }
 ].filter(api => api.enabled);
+
 let lastSearchApiIndex = Math.floor(Math.random() * SEARCH_APIS.length) - 1;
 const inFlightSearches = {};
 const userRateLimits = new Map();
+
 function checkRateLimit(userId) {
   const now = Date.now();
   const userRequests = userRateLimits.get(userId) || [];
@@ -155,6 +169,7 @@ function checkRateLimit(userId) {
     userRateLimits.delete(oldestKey);
   }
 }
+
 function sanitizeMessage(msg) {
   if (!msg || typeof msg !== 'string') return '';
   
@@ -164,6 +179,7 @@ function sanitizeMessage(msg) {
     .trim()
     .substring(0, 3000);
 }
+
 async function extractSearchKeywords(message) {
   try {
     const response = await callGroqWithRetry({
@@ -212,6 +228,7 @@ async function summarizeSearchResults(results, question) {
     return results.substring(0, 1500);
   }
 }
+
 async function searchWeb(query) {
   if (!SEARCH_APIS.length) {
     console.warn('⚠️ No search APIs available');
@@ -220,6 +237,7 @@ async function searchWeb(query) {
   
   const cleanedQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanedQuery}`;
+  
   if (inFlightSearches[cleanedQuery]) {
     try {
       return await inFlightSearches[cleanedQuery];
@@ -227,6 +245,7 @@ async function searchWeb(query) {
       return null;
     }
   }
+  
   inFlightSearches[cleanedQuery] = (async () => {
     try {
       let cached = null;
@@ -238,8 +257,8 @@ async function searchWeb(query) {
           }
           return cached;
         }
-      } catch(e) { 
-        }
+      } catch(e) {}
+      
       for (let i = 0; i < SEARCH_APIS.length; i++) {
         lastSearchApiIndex = (lastSearchApiIndex + 1) % SEARCH_APIS.length;
         const api = SEARCH_APIS[lastSearchApiIndex];        
@@ -250,13 +269,11 @@ async function searchWeb(query) {
               await redisWithTimeout(
                 redis.set(cacheKey, JSON.stringify(result), { ex: 1800 })
               );
-            } catch(e) { 
-              }           
+            } catch(e) {}           
             return result;
-          } else {
-            }
+          }
         } catch (e) {
-          console.warn(`❌ ${api.name} error:`, e?.message || e, '\nStack:', e?.stack?.split('\n')[0]);
+          console.warn(`❌ ${api.name} error:`, e?.message || e);
           continue;
         }
       }
@@ -268,8 +285,10 @@ async function searchWeb(query) {
       delete inFlightSearches[cleanedQuery];
     }
   })();
+  
   return await inFlightSearches[cleanedQuery];
 }
+
 async function analyzeIntent(message, history) {
   const triggers = {
     search: /hiện (tại|nay|giờ)|bây giờ|lúc này|tìm|tra|search|năm (19|20)\d{2}|mới nhất|gần đây|tin tức|thời tiết|giá|tỷ giá|cập nhật|xu hướng/i,
@@ -279,12 +298,14 @@ async function analyzeIntent(message, history) {
     explanation: /giải thích|tại sao|vì sao|làm sao|như thế nào|thế nào là/i,
     comparison: /so sánh|khác nhau|tốt hơn|nên chọn|đâu là|hay hơn/i,
   };
+  
   let intent = {
     type: 'general',
     needsSearch: false,
     complexity: 'simple',
     needsDeepThinking: false
   };  
+  
   if (triggers.search.test(message)) {
     intent.type = 'search';
     intent.needsSearch = true;
@@ -304,6 +325,7 @@ async function analyzeIntent(message, history) {
     intent.type = 'explanation';
     intent.needsDeepThinking = true;
   } 
+  
   if (message.length > 200 || message.split('?').length > 2) {
     intent.complexity = 'complex';
     intent.needsDeepThinking = true;
@@ -337,7 +359,9 @@ async function needsWebSearch(message, intent) {
     /so sánh|khác nhau|tốt hơn|nên chọn|đâu là/i,
     /\d+\s*(năm|tháng|tuần|ngày)\s*(trước|sau|tới|nữa)/i,
   ];
+  
   if (triggers.some(r => r.test(message))) return true;
+  
   if (message.includes('?') && message.length < 150) {
     try {
       const response = await callGroqWithRetry({
@@ -391,18 +415,22 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   }
   throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError?.message || 'Unknown error'}`);
 }
+
+// 🔧 FIX: Bỏ check viết hoa, chỉ check cơ bản
 function isValidName(name) {
   if (!name || typeof name !== 'string') return false;
   
   const trimmed = name.trim();
   if (trimmed.length < 2 || trimmed.length > 50) return false;
   if (/(.)\1{2,}/.test(trimmed.toLowerCase())) return false;
+  
   const keyboards = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm', '1234567890'];
   if (keyboards.some(k => k.includes(trimmed.toLowerCase()))) return false;
+  
   const invalidNames = /^(kiki|lala|baba|lolo|kaka|xixi|bibi|test|abc|xyz|aa|bb|cc|dd|ee|haha|hihi|hoho|hehe|admin|user|guest|default)$/i;
   if (invalidNames.test(trimmed)) return false;
-  if (!/^[A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ]/.test(trimmed)) return false;
   
+  // 🔧 FIX: Bỏ check viết hoa bắt buộc
   return true;
 }
 
@@ -413,16 +441,16 @@ async function extractMemory(message, currentMemory) {
 TIN NHẮN: "${message}"
 
 THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
+
 Quy tắc BẮT BUỘC - ĐỌC KỸ:
 1. TÊN: 
-   - CHỈ lưu tên thật có ít nhất 2 ký tự, viết hoa chữ cái đầu
+   - CHỈ lưu tên thật có ít nhất 2 ký tự (chấp nhận cả chữ thường)
    - KHÔNG lưu: kiki, lala, baba, test, abc, xyz, hoặc bất kỳ từ vô nghĩa nào
-   - Ví dụ HỢP LỆ: Minh, An, Tuấn, Ngọc, Ly
+   - Ví dụ HỢP LỆ: Minh, minh, An, Tuấn, ngọc
    - Ví dụ KHÔNG HỢP LỆ: kiki, lolo, abc, test123
 2. TUỔI: 
    - Chấp nhận mọi tuổi từ 0-120 (bao gồm cả tuổi trẻ em, người già)
    - CHỈ chặn số hoàn toàn vô lý như số âm hoặc >150
-   - Ví dụ HỢP LỆ: "Tôi 25 tuổi", "Con tôi 3 tuổi", "Bố mình 70 tuổi"
 3. NGHỀ NGHIỆP: 
    - CHỈ lưu nghề thực tế: lập trình viên, bác sĩ, sinh viên, giáo viên, nhân viên...
    - KHÔNG lưu mô tả chung hoặc từ vô nghĩa
@@ -432,12 +460,14 @@ Quy tắc BẮT BUỘC - ĐỌC KỸ:
 5. CHUNG:
    - KHÔNG lưu hành động tạm thời, câu hỏi, yêu cầu
    - CHỈ lưu khi user THỰC SỰ chia sẻ info bản thân
+
 Ví dụ HỢP LỆ - CẦN lưu:
 ✅ "Tôi tên Minh, 25 tuổi" → {"name": "Minh", "age": 25}
 ✅ "Mình là dev ở HN" → {"occupation": "Developer", "location": "Hà Nội"}
 ✅ "Em thích đọc sách" → {"hobbies": "đọc sách"}
-✅ "Tôi tên Ly, 22 tuổi" → {"name": "Ly", "age": 22}
+✅ "Tôi tên minh" → {"name": "Minh"}
 ✅ "Con tôi 3 tuổi" → {"childAge": 3}
+
 Ví dụ KHÔNG HỢP LỆ - KHÔNG lưu:
 ❌ "Tôi tên kiki" → TÊN VÔ NGHĨA
 ❌ "Tôi là lala" → TỪ VÔ NGHĨA
@@ -475,26 +505,33 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
     if (parsed.hasNewInfo && !parsed.updates) {
       return { hasNewInfo: false };
     }
+    
     if (parsed.hasNewInfo && parsed.updates) {
       if (parsed.updates.name) {
+        // 🔧 FIX: Chuẩn hóa tên (viết hoa chữ cái đầu)
+        const normalized = parsed.updates.name.trim().toLowerCase();
+        parsed.updates.name = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+        
         if (!isValidName(parsed.updates.name)) {
           delete parsed.updates.name;
-          }
+        }
       }
       
       if (parsed.updates.age) {
         const age = parseInt(parsed.updates.age);
         if (isNaN(age) || age < 0 || age > 150) {
           delete parsed.updates.age;
-          }
+        }
       }    
+      
       if (parsed.updates.occupation) {
         const occupation = parsed.updates.occupation.toLowerCase();
         const invalidOccupations = /^(kiki|lala|test|abc|xyz|admin|user)$/i;
         if (occupation.length < 3 || invalidOccupations.test(occupation)) {
           delete parsed.updates.occupation;
-          }
+        }
       }
+      
       if (Object.keys(parsed.updates).length === 0) {
         return { hasNewInfo: false };
       }
@@ -503,14 +540,17 @@ Nếu message chỉ chứa từ vô nghĩa, BẮT BUỘC trả:
     return parsed;
     
   } catch (e) {
+    console.error('❌ extractMemory error:', e);
     return { hasNewInfo: false };
   }
 }
+
 async function deepThinking(message, context) {
   try {
     const thinkingPrompt = `Phân tích câu hỏi sau theo từng bước logic:
 
 CÂU HỎI: "${message}"
+
 Hãy:
 1. Xác định vấn đề cốt lõi
 2. Liệt kê các yếu tố cần xem xét
@@ -532,8 +572,10 @@ Hãy:
     return null;
   }
 }
+
 function buildSystemPrompt(memory, searchResults = null, intent = null, deepThought = null) {
   let prompt = `Bạn là KAMI, một AI thông minh, được tạo ra bởi Nguyễn Đức Thạnh.
+
 NGUYÊN TẮC:
 1. Ngôn ngữ & Phong cách: Trả lời bằng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác. Xưng "tôi" hoặc theo cách user yêu cầu, gọi user tùy tiền tố họ chọn. Giọng điệu thân thiện nhưng chuyên nghiệp.
 2. Độ chính xác cao: 
@@ -551,6 +593,7 @@ NGUYÊN TẮC:
    - Ví dụ: Nếu biết user là dev, có thể dùng thuật ngữ kỹ thuật thoải mái hơn
    - TRÁNH nhắc lại thông tin một cách gượng ép như "Như em đã nói, em tên X..."
    - Chỉ đề cập khi THỰC SỰ liên quan đến câu trả lời`;
+  
   if (intent) {
     prompt += `\n\n📋 LOẠI YÊU CẦU: ${intent.type} (độ phức tạp: ${intent.complexity})`;
     
@@ -584,6 +627,7 @@ NGUYÊN TẮC:
   return prompt;
 }
 
+// 🔧 FIX: Thêm retry và better error handling
 async function safeRedisGet(key, defaultValue = null) {
   try {
     const data = await redisWithTimeout(redis.get(key));
@@ -596,7 +640,13 @@ async function safeRedisGet(key, defaultValue = null) {
   }
 }
 
+// 🔧 FIX: Thêm validation và retry
 async function safeRedisSet(key, value, expirySeconds = null) {
+  if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) {
+    console.warn(`⚠️ Attempted to save empty value for key ${key}`);
+    return false;
+  }
+  
   try {
     const stringified = typeof value === 'string' ? value : JSON.stringify(value);
     if (expirySeconds) {
@@ -611,34 +661,51 @@ async function safeRedisSet(key, value, expirySeconds = null) {
   }
 }
 
+// 🔧 FIX: Improved validation và logging
 async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
   if (!newMemory || typeof newMemory !== 'object') {
     console.error('❌ Invalid memory object');
     return false;
   }
   
-  const saved = await safeRedisSet(memoryKey, newMemory, 7776000);
+  // 🔧 FIX: Không save nếu memory rỗng
+  if (Object.keys(newMemory).length === 0) {
+    console.warn('⚠️ Attempted to save empty memory');
+    return false;
+  }
+  
+  console.log(`💾 Saving memory for key ${memoryKey}:`, JSON.stringify(newMemory));
+  
+  const saved = await safeRedisSet(memoryKey, newMemory, 31536000); // 🔧 FIX: 1 năm TTL thay vì 90 ngày
   
   if (!saved) {
     console.error('❌ Failed to save to Redis');
     return false;
   }
   
+  // 🔧 FIX: Đợi một chút để Redis commit
+  await new Promise(r => setTimeout(r, 100));
+  
   const verified = await safeRedisGet(memoryKey);
   if (!verified) {
     console.error('❌ Memory verification failed - not found in Redis');
     return false;
   }  
+  
   const verifiedKeys = Object.keys(verified);
   const expectedKeys = Object.keys(newMemory);  
+  
   if (verifiedKeys.length !== expectedKeys.length) {
     console.error('❌ Memory verification failed - key count mismatch');
     console.error('Expected:', expectedKeys);
     console.error('Got:', verifiedKeys);
     return false;
   }
+  
+  console.log(`✅ Memory saved and verified successfully`);
   return true;
 }
+
 async function shouldExtractMemory(message) {
   const SKIP_PATTERNS = [
     /^(hi|hello|chào|hey|xin chào|ok|oke|okee|được|rồi|cảm ơn|thanks|bye)$/i,
@@ -648,47 +715,73 @@ async function shouldExtractMemory(message) {
   if (SKIP_PATTERNS.some(p => p.test(message.trim()))) {
     return false;
   }
+  
   const NONSENSE_WORDS = ['kiki', 'lala', 'lolo', 'baba', 'test123', 'asdfgh'];
   const words = message.toLowerCase().split(/\s+/);
   const nonsenseCount = words.filter(w => NONSENSE_WORDS.includes(w)).length;  
+  
   if (nonsenseCount > words.length * 0.5) {
     return false;
   }  
-  const PERSONAL_INDICATORS = [    /(?:tôi|mình|em|con)\s+(?:là|tên|họ|năm nay|tuổi)/i,
+  
+  const PERSONAL_INDICATORS = [
+    /(?:tôi|mình|em|con)\s+(?:là|tên|họ|năm nay|tuổi)/i,
     /(?:tôi|mình|em)\s+(?:làm|học|sống ở|ở|thích|yêu|đam mê)/i,
     /(?:nghề|công việc|job|occupation)\s+(?:của\s+)?(?:tôi|mình|em)/i,
     /(?:sở thích|hobby|hobbies)\s+(?:của\s+)?(?:tôi|mình|em)/i,
   ];  
+  
   return PERSONAL_INDICATORS.some(p => p.test(message));
 }
+
+// 🔧 FIX: LOGIC HOÀN TOÀN MỚI - CHỈ recover khi memory thực sự rỗng
 async function recoverMemoryIfNeeded(userId, conversationHistory) {
   const memoryKey = `memory:${userId}`;
-  const memory = await safeRedisGet(memoryKey);
-  if (memory && Object.keys(memory).length > 0) {
-    return memory;
-  } 
+  
+  // 🔧 FIX: Kiểm tra memory hiện tại TRƯỚC
+  const existingMemory = await safeRedisGet(memoryKey);
+  
+  // 🔧 FIX: Nếu đã có memory, TRẢ NGAY không recover
+  if (existingMemory && Object.keys(existingMemory).length > 0) {
+    console.log(`✅ Found existing memory with ${Object.keys(existingMemory).length} keys`);
+    return existingMemory;
+  }
+  
+  console.log(`⚠️ No existing memory found, attempting recovery...`);
+  
+  // Chỉ recover nếu thực sự không có memory
   const personalMessages = conversationHistory
     .filter(msg => msg.role === 'user')
     .map(msg => msg.content)
     .join('\n'); 
+  
   if (personalMessages.length < 10) {
+    console.log(`ℹ️ Not enough conversation history to recover memory`);
     return {};
   }  
+  
   try {
     const recovered = await extractMemory(personalMessages, {});   
-    if (recovered.hasNewInfo && recovered.updates) {
+    
+    if (recovered.hasNewInfo && recovered.updates && Object.keys(recovered.updates).length > 0) {
+      console.log(`🔄 Recovered memory:`, JSON.stringify(recovered.updates));
       await saveMemoryWithValidation(memoryKey, recovered.updates, {});
       return recovered.updates;
     }
   } catch (e) {
-    }  
+    console.error('❌ Memory recovery failed:', e);
+  }  
+  
   return {};
 }
+
 async function summarizeHistory(history) {
   if (history.length < 15) return history;
+  
   try {
     const oldMessages = history.slice(0, -10);
     const recentMessages = history.slice(-10);    
+    
     const summary = await callGroqWithRetry({
       messages: [
         { role: 'system', content: 'Tóm tắt cuộc hội thoại sau thành 3-4 điểm chính. Giữ nguyên thông tin quan trọng.' },
@@ -698,18 +791,22 @@ async function summarizeHistory(history) {
       temperature: 0.3,
       max_tokens: 300
     });
+    
     const summaryText = summary.choices[0]?.message?.content || '';
+    
     if (recentMessages.length > 0 && recentMessages[0].role === 'user') {
       recentMessages[0] = {
         ...recentMessages[0],
         content: `[Bối cảnh cuộc trò chuyện trước: ${summaryText}]\n\n${recentMessages[0].content}`
       };
     }
+    
     return recentMessages;
   } catch (e) {
     return history.slice(-12);
   }
 }
+
 const metrics = {
   totalRequests: 0,
   searchCalls: 0,
@@ -718,6 +815,7 @@ const metrics = {
   avgResponseTime: 0,
   lastReset: Date.now()
 };
+
 function updateMetrics(type, value = 1) {
   metrics[type] = (metrics[type] || 0) + value;
   if (Date.now() - metrics.lastReset > 3600000) {
@@ -727,8 +825,10 @@ function updateMetrics(type, value = 1) {
     metrics.lastReset = Date.now();
   }
 }
+
 export default async function handler(req, res) {
   const startTime = Date.now();
+  
   if (req.method === 'GET') {
     if (req.url === '/health' || req.url?.includes('/health')) {
       try {
@@ -774,6 +874,7 @@ export default async function handler(req, res) {
     if (sanitizedMessage.length > 3000) {
       return res.status(400).json({ error: 'Tin nhắn quá dài (tối đa 3000 ký tự)' });
     }
+    
     try {
       checkRateLimit(userId);
     } catch (e) {
@@ -785,10 +886,14 @@ export default async function handler(req, res) {
 
     const chatKey = `chat:${userId}:${conversationId}`;
     const memoryKey = `memory:${userId}`;
+    
     let conversationHistory, userMemory;
+    
+    // 🔧 FIX: Load cả 2 parallel nhưng xử lý error riêng
     try {
       const results = await redisWithTimeout(redis.mget(chatKey, memoryKey));
       const [historyData, memoryData] = results || [null, null];
+      
       conversationHistory = historyData;
       if (typeof historyData === 'string') {
         try { conversationHistory = JSON.parse(historyData); } catch { conversationHistory = []; }
@@ -802,10 +907,12 @@ export default async function handler(req, res) {
       if (!userMemory) userMemory = {};
       
     } catch (e) {
+      console.error('❌ mget failed, falling back to individual gets:', e);
       conversationHistory = await safeRedisGet(chatKey, []);
       userMemory = await safeRedisGet(memoryKey, {});
     }
     
+    // Validate conversation history
     if (!Array.isArray(conversationHistory)) {
       conversationHistory = [];
     } else {
@@ -818,12 +925,21 @@ export default async function handler(req, res) {
       });
     }
     
+    // Validate memory
     if (typeof userMemory !== 'object' || userMemory === null || Array.isArray(userMemory)) {
       userMemory = {};
     }
-    userMemory = await recoverMemoryIfNeeded(userId, conversationHistory);
+    
+    // 🔧 FIX: CHỈ recover khi memory thực sự rỗng
+    if (Object.keys(userMemory).length === 0) {
+      console.log(`ℹ️ Memory is empty, checking if recovery is needed...`);
+      userMemory = await recoverMemoryIfNeeded(userId, conversationHistory);
+    } else {
+      console.log(`✅ Using existing memory with ${Object.keys(userMemory).length} keys:`, JSON.stringify(userMemory));
+    }
     
     const intent = await analyzeIntent(sanitizedMessage, conversationHistory);
+    
     if (!Array.isArray(conversationHistory)) {
       conversationHistory = [];
     }
@@ -836,6 +952,7 @@ export default async function handler(req, res) {
     let searchResults = null;
     let usedSearch = false;
     let searchKeywords = null;
+    
     if (await needsWebSearch(sanitizedMessage, intent)) {
       updateMetrics('searchCalls');
       
@@ -845,8 +962,7 @@ export default async function handler(req, res) {
       if (rawSearchResults) {
         searchResults = await summarizeSearchResults(rawSearchResults, sanitizedMessage);
         usedSearch = true;
-        } else {
-        }
+      }
     }
     
     let deepThought = null;
@@ -881,14 +997,22 @@ export default async function handler(req, res) {
     }
     
     let memoryUpdated = false;
+    let memoryUpdateDetails = null;
     
     const shouldExtract = await shouldExtractMemory(sanitizedMessage);
 
     if (shouldExtract) {
+      console.log(`🔍 Extracting memory from message: "${sanitizedMessage}"`);
+      
       const memoryExtraction = await extractMemory(sanitizedMessage, userMemory);      
-      if (memoryExtraction.hasNewInfo && memoryExtraction.updates) {
+      
+      if (memoryExtraction.hasNewInfo && memoryExtraction.updates && Object.keys(memoryExtraction.updates).length > 0) {
         const oldMemoryCount = Object.keys(userMemory).length;
+        
+        // 🔧 FIX: Merge cẩn thận, giữ lại old memory
         const newMemory = { ...userMemory, ...memoryExtraction.updates };
+        
+        console.log(`📝 Attempting to save new memory:`, JSON.stringify(newMemory));
         
         const saved = await saveMemoryWithValidation(memoryKey, newMemory, userMemory);
         
@@ -897,13 +1021,34 @@ export default async function handler(req, res) {
           memoryUpdated = true;
           
           const newMemoryCount = Object.keys(userMemory).length;
-          } else {
+          memoryUpdateDetails = {
+            added: Object.keys(memoryExtraction.updates),
+            totalKeys: newMemoryCount,
+            previousKeys: oldMemoryCount
+          };
+          
+          console.log(`✅ Memory updated successfully:`, memoryUpdateDetails);
+        } else {
+          console.error('❌ Failed to save memory');
           memoryUpdated = false;
         }
+      } else {
+        console.log(`ℹ️ No new memory to extract`);
       }
     }
+    
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
-    await safeRedisSet(chatKey, conversationHistory, 7776000);
+    
+    // 🔧 FIX: Save chat history với retry
+    const historySaved = await safeRedisSet(chatKey, conversationHistory, 31536000); // 1 năm
+    if (!historySaved) {
+      console.error('❌ Failed to save conversation history');
+    }
+    
+    // 🔧 FIX: Refresh memory TTL mỗi lần request
+    if (Object.keys(userMemory).length > 0) {
+      await safeRedisSet(memoryKey, userMemory, 31536000); // 1 năm
+    }
     
     const responseTime = Date.now() - startTime;
     updateMetrics('avgResponseTime', responseTime);
@@ -915,7 +1060,9 @@ export default async function handler(req, res) {
       conversationId,
       historyLength: conversationHistory.length,
       memoryUpdated,
+      memoryUpdateDetails,
       memoryCount: Object.keys(userMemory).length,
+      currentMemory: userMemory, // 🔧 FIX: Trả về memory hiện tại để debug
       usedWebSearch: usedSearch,
       searchKeywords: usedSearch ? searchKeywords : null,
       intent: intent.type,
