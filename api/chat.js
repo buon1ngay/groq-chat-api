@@ -9,8 +9,6 @@ const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
-
-// 🔧 FIX: Tăng timeout và thêm retry
 async function redisWithTimeout(operation, timeoutMs = 10000, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -22,7 +20,7 @@ async function redisWithTimeout(operation, timeoutMs = 10000, retries = 3) {
       ]);
     } catch (e) {
       if (i === retries - 1) throw e;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Exponential backoff
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
 }
@@ -237,14 +235,11 @@ async function searchWeb(query) {
   
   const cleanedQuery = query.trim().toLowerCase();
   const cacheKey = `search:${cleanedQuery}`;
-  
-  // 🔧 FIX: Check in-flight to prevent duplicate searches
   if (inFlightSearches[cleanedQuery]) {
     try {
-      console.log('⏳ Waiting for existing search to complete...');
       return await inFlightSearches[cleanedQuery];
     } catch (e) {
-      delete inFlightSearches[cleanedQuery]; // Cleanup on error
+      delete inFlightSearches[cleanedQuery];
       return null;
     }
   }
@@ -418,8 +413,6 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   }
   throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError?.message || 'Unknown error'}`);
 }
-
-// 🔧 CRITICAL FIX: Redis Locking với Upstash response handling
 async function acquireLock(lockKey, ttl = 5000) {
   const lockValue = `${Date.now()}-${Math.random()}`;
   
@@ -428,13 +421,9 @@ async function acquireLock(lockKey, ttl = 5000) {
       ex: Math.ceil(ttl / 1000), 
       nx: true 
     });
-    
-    // 🔧 FIX: Upstash trả về "OK" (string) khi success, null khi fail
     if (result === "OK") {
       return lockValue;
     }
-    
-    // Retry với exponential backoff
     for (let i = 0; i < 3; i++) {
       await new Promise(r => setTimeout(r, 100 * Math.pow(2, i)));
       
@@ -460,7 +449,6 @@ async function releaseLock(lockKey, lockValue) {
     const current = await redis.get(lockKey);
     if (current === lockValue) {
       const result = await redis.del(lockKey);
-      // 🔧 FIX: DEL trả về số lượng keys deleted (1 hoặc 0)
       return result === 1 || result === "1";
     }
     return false;
@@ -469,19 +457,13 @@ async function releaseLock(lockKey, lockValue) {
     return false;
   }
 }
-
-// 🔧 DYNAMIC MEMORY: Cho phép MỌI fields hợp lệ
-const MAX_CUSTOM_FIELDS = 20; // Giới hạn tổng số fields
+const MAX_CUSTOM_FIELDS = 20;
 const MAX_FIELD_NAME_LENGTH = 50;
 const MAX_FIELD_VALUE_LENGTH = 500;
 
 function isValidFieldName(fieldName) {
   if (!fieldName || typeof fieldName !== 'string') return false;
   if (fieldName.length > MAX_FIELD_NAME_LENGTH) return false;
-  
-  // CHỈ check format, KHÔNG chặn content
-  // Allow: letters, numbers, underscore
-  // Must start with letter
   if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(fieldName)) {
     console.warn(`⚠️ Invalid field name format: ${fieldName}`);
     return false;
@@ -492,8 +474,6 @@ function isValidFieldName(fieldName) {
 
 function filterMemoryFields(updates, existingMemory = {}) {
   if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return {};
-  
-  // 🔧 FIX: Validate existingMemory
   if (!existingMemory || typeof existingMemory !== 'object' || Array.isArray(existingMemory)) {
     existingMemory = {};
   }
@@ -502,18 +482,13 @@ function filterMemoryFields(updates, existingMemory = {}) {
   const currentFieldCount = Object.keys(existingMemory).length;
   
   for (const [field, value] of Object.entries(updates)) {
-    // Skip if too many fields already
     if (currentFieldCount + Object.keys(filtered).length >= MAX_CUSTOM_FIELDS) {
       console.warn(`⚠️ Max fields limit (${MAX_CUSTOM_FIELDS}) reached`);
       break;
     }
-    
-    // Validate field name FORMAT only
     if (!isValidFieldName(field)) {
       continue;
     }
-    
-    // Validate field value
     if (value === null || value === undefined) continue;
     
     if (typeof value === 'string') {
@@ -528,10 +503,7 @@ function filterMemoryFields(updates, existingMemory = {}) {
     if (typeof value === 'number') {
       if (!Number.isFinite(value)) continue;
     }
-    
-    // 🔧 ADD: Reject boolean (ambiguous)
     if (typeof value === 'boolean') {
-      // Convert to string for clarity
       filtered[field] = value ? 'true' : 'false';
       continue;
     }
@@ -546,8 +518,6 @@ function filterMemoryFields(updates, existingMemory = {}) {
   
   return filtered;
 }
-
-// 🔧 FIX: Bỏ check viết hoa, chỉ check cơ bản
 function isValidName(name) {
   if (!name || typeof name !== 'string') return false;
   
@@ -560,8 +530,6 @@ function isValidName(name) {
   
   const invalidNames = /^(kiki|lala|baba|lolo|kaka|xixi|bibi|test|abc|xyz|aa|bb|cc|dd|ee|haha|hihi|hoho|hehe|admin|user|guest|default)$/i;
   if (invalidNames.test(trimmed)) return false;
-  
-  // 🔧 FIX: Bỏ check viết hoa bắt buộc
   return true;
 }
 
@@ -677,13 +645,9 @@ Trả về JSON:
     
     const parsed = JSON.parse(jsonMatch[0]);
     if (!parsed.hasNewInfo || !parsed.updates) return { hasNewInfo: false };
-    
-    // 🔧 CRITICAL: Filter với dynamic whitelist
     parsed.updates = filterMemoryFields(parsed.updates, currentMemory);
     
     if (Object.keys(parsed.updates).length === 0) return { hasNewInfo: false };
-    
-    // Validate common fields nếu có
     if (parsed.updates.name) {
       const normalized = parsed.updates.name.trim().toLowerCase();
       parsed.updates.name = normalized.charAt(0).toUpperCase() + normalized.slice(1);
@@ -799,7 +763,6 @@ NGUYÊN TẮC:
 }
 
 async function safeRedisGet(key, defaultValue = null) {
-  // 🔧 FIX: Validate key
   if (!key || typeof key !== 'string' || key.trim().length === 0) {
     console.error('❌ Invalid Redis key:', key);
     return defaultValue;
@@ -817,7 +780,6 @@ async function safeRedisGet(key, defaultValue = null) {
 }
 
 async function safeRedisSet(key, value, expirySeconds = null) {
-  // 🔧 FIX: Validate key and value
   if (!key || typeof key !== 'string' || key.trim().length === 0) {
     console.error('❌ Invalid Redis key:', key);
     return false;
@@ -837,8 +799,6 @@ async function safeRedisSet(key, value, expirySeconds = null) {
     } else {
       result = await redisWithTimeout(redis.set(key, stringified));
     }
-    
-    // 🔧 FIX: Upstash trả về "OK" hoặc null
     return result === "OK";
   } catch (e) {
     console.error(`❌ Redis SET failed for key ${key}:`, e?.message || e);
@@ -857,10 +817,7 @@ async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
       console.error('❌ Failed to save memory to Redis');
       return false;
     }
-    
-    // 🔧 FIX: Wait for Redis to commit (increase to 200ms for Upstash)
-    await new Promise(r => setTimeout(r, 200));
-    
+    await new Promise(r => setTimeout(r, 200));  
     const verified = await safeRedisGet(memoryKey);
     if (!verified || typeof verified !== 'object') {
       console.error('❌ Memory verification failed - invalid response');
@@ -876,8 +833,6 @@ async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
       console.error('Got keys:', verifiedKeys);
       return false;
     }
-    
-    // 🔧 ADD: Verify each key exists
     for (const key of expectedKeys) {
       if (!(key in verified)) {
         console.error(`❌ Memory verification failed - missing key: ${key}`);
@@ -891,8 +846,6 @@ async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
     return false;
   }
 }
-
-// 🔧 FIX: Remove unnecessary async (no await inside)
 function mergeMemories(oldMemory, newUpdates) {
   if (!oldMemory || typeof oldMemory !== 'object') {
     oldMemory = {};
@@ -904,17 +857,12 @@ function mergeMemories(oldMemory, newUpdates) {
   const merged = { ...oldMemory };
   
   for (const [key, value] of Object.entries(newUpdates)) {
-    // Skip null/undefined values
     if (value === null || value === undefined) {
       continue;
     }
-    
-    // Skip empty strings
     if (typeof value === 'string' && value.trim().length === 0) {
       continue;
     }
-    
-    // Update value
     merged[key] = value;
   }
   
@@ -938,19 +886,15 @@ async function shouldExtractMemory(message) {
   if (nonsenseCount > words.length * 0.5) {
     return false;
   }
-  
-  // 🔧 CRITICAL FIX: Detect EXPLICIT save commands
   const EXPLICIT_SAVE_COMMANDS = [
-    /\b(lưu|ghi nhớ|nhớ|ghi lại|save|remember|note)\b.{3,}/i,
-    /\b(hãy|giúp|help).*(lưu|nhớ|ghi|save|remember)/i,
+    /\b(lưu|ghi nhớ|nhớ|ghi lại|bổ sung|cập nhật|nhớ giùm)\b.{3,}/i,
+    /\b(hãy|giúp|help).*(lưu|nhớ|ghi)/i,
   ];
   
   if (EXPLICIT_SAVE_COMMANDS.some(p => p.test(message))) {
-    return true; // ✅ User YÊU CẦU lưu → LUÔN extract
+    return true;
   }
-  
-  // Check personal info patterns (as before)
-  const PERSONAL_INDICATORS = [
+const PERSONAL_INDICATORS = [
     /(?:tôi|mình|em|con)\s+(?:là|tên|họ|năm nay|tuổi)/i,
     /(?:tôi|mình|em)\s+(?:làm|học|sống ở|ở|thích|yêu|đam mê)/i,
     /(?:nghề|công việc|job|occupation)\s+(?:của\s+)?(?:tôi|mình|em)/i,
@@ -987,12 +931,8 @@ async function recoverMemoryIfNeeded(userId, conversationHistory) {
   
   return {};
 }
-
-// 🔧 FIX: Import missing dependencies và constants
 const summaryCache = new Map();
 const memoryExtractionDebounce = new Map();
-
-// 🔧 Consolidated: Periodic cache cleanup
 setInterval(() => {
   const now = Date.now();
   for (const [key, value] of summaryCache.entries()) {
@@ -1040,8 +980,6 @@ async function summarizeHistory(history, userId, conversationId) {
     return history.slice(-12);
   }
 }
-
-// 🔧 OPTIMIZATION: Batch Redis operations để giảm latency
 async function batchSaveData(operations) {
   if (!operations || operations.length === 0) {
     console.warn('⚠️ No operations to save');
@@ -1051,7 +989,7 @@ async function batchSaveData(operations) {
   const promises = operations.map(async ({ key, value, ttl }) => {
     try {
       const result = await safeRedisSet(key, value, ttl);
-      return result; // true/false
+      return result;
     } catch (e) {
       console.error(`❌ Failed to save ${key}:`, e);
       return false;
@@ -1059,14 +997,9 @@ async function batchSaveData(operations) {
   });
   
   const results = await Promise.all(promises);
-  
-  // 🔧 ADD: Log summary
   const successCount = results.filter(r => r === true).length;
-  console.log(`📦 Batch save: ${successCount}/${operations.length} successful`);
-  
   return results;
 }
-
 const metrics = {
   totalRequests: 0,
   searchCalls: 0,
@@ -1076,7 +1009,6 @@ const metrics = {
   memoryUpdates: 0,
   lastReset: Date.now()
 };
-
 function updateMetrics(type, value = 1) {
   metrics[type] = (metrics[type] || 0) + value;
   if (Date.now() - metrics.lastReset > 3600000) {
@@ -1086,7 +1018,6 @@ function updateMetrics(type, value = 1) {
     metrics.lastReset = Date.now();
   }
 }
-
 export default async function handler(req, res) {
   const startTime = Date.now();
   
@@ -1121,8 +1052,6 @@ export default async function handler(req, res) {
     updateMetrics('totalRequests');
     
     const { message, userId = 'default', conversationId = 'default' } = req.body;
-    
-    // 🔧 FIX: Validate and sanitize userId and conversationId
     const sanitizedUserId = (userId && typeof userId === 'string') 
       ? userId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 100) || 'default'
       : 'default';
@@ -1158,13 +1087,9 @@ export default async function handler(req, res) {
     const memoryKey = `memory:${sanitizedUserId}`;
     
     let conversationHistory, userMemory;
-    
-    // 🔧 FIX: Load cả 2 parallel với better error handling
     try {
       const results = await redisWithTimeout(redis.mget(chatKey, memoryKey));
-      
-      // 🔧 FIX: Handle undefined/null results safely
-      if (!results || !Array.isArray(results)) {
+if (!results || !Array.isArray(results)) {
         throw new Error('Invalid mget response');
       }
       
@@ -1187,9 +1112,7 @@ export default async function handler(req, res) {
       conversationHistory = await safeRedisGet(chatKey, []);
       userMemory = await safeRedisGet(memoryKey, {});
     }
-    
-    // Validate conversation history
-    if (!Array.isArray(conversationHistory)) {
+if (!Array.isArray(conversationHistory)) {
       conversationHistory = [];
     } else {
       conversationHistory = conversationHistory.filter(msg => {
@@ -1200,25 +1123,17 @@ export default async function handler(req, res) {
         return true;
       });
     }
-    
-    // Validate memory
-    if (typeof userMemory !== 'object' || userMemory === null || Array.isArray(userMemory)) {
+if (typeof userMemory !== 'object' || userMemory === null || Array.isArray(userMemory)) {
       userMemory = {};
-    }
-    
-    // Only recover if empty
-    if (Object.keys(userMemory).length === 0) {
+    } 
+if (Object.keys(userMemory).length === 0) {
       userMemory = await recoverMemoryIfNeeded(sanitizedUserId, conversationHistory);
     }
-    
-    const intent = await analyzeIntent(sanitizedMessage, conversationHistory);
-    
+    const intent = await analyzeIntent(sanitizedMessage, conversationHistory);    
     if (!Array.isArray(conversationHistory)) {
       conversationHistory = [];
     }
-    
-    // 🔧 FIX: Add user message BEFORE summarizing
-    conversationHistory.push({ role: 'user', content: sanitizedMessage });
+conversationHistory.push({ role: 'user', content: sanitizedMessage });
     
     if (conversationHistory.length > 30) {
       conversationHistory = await summarizeHistory(conversationHistory, sanitizedUserId, sanitizedConversationId);
@@ -1270,8 +1185,6 @@ export default async function handler(req, res) {
     if (usedSearch === false && intent.needsSearch && !searchResults) {
       assistantMessage = "⚠️ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
     }
-    
-    // 🔧 CRITICAL FIX: Memory update với Redis locking
     let memoryUpdated = false;
     let memoryUpdateDetails = null;
     
@@ -1283,7 +1196,6 @@ export default async function handler(req, res) {
         console.warn('⚠️ Could not acquire memory lock, skipping update');
       } else {
         try {
-          // 🔧 RE-READ memory sau khi có lock
           const freshMemory = await safeRedisGet(memoryKey, {});
           
           const memoryExtraction = await extractMemory(sanitizedMessage, freshMemory);      
@@ -1298,33 +1210,26 @@ export default async function handler(req, res) {
                 added: Object.keys(memoryExtraction.updates),
                 totalKeys: Object.keys(newMemory).length
               };
-              userMemory = newMemory; // Update local copy
+              userMemory = newMemory;
               updateMetrics('memoryUpdates');
             }
           }
         } finally {
-          // 🔧 CRITICAL: Always release lock
           await releaseLock(lockKey, lockValue);
         }
       }
     }
     
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
-    
-    // 🔧 OPTIMIZATION: Batch save để giảm latency
     const saveOperations = [
       { key: chatKey, value: conversationHistory, ttl: 31536000 }
     ];
-    
-    // 🔧 FIX: Refresh memory TTL mỗi lần request
     if (Object.keys(userMemory).length > 0) {
       saveOperations.push({ key: memoryKey, value: userMemory, ttl: 31536000 });
     }
     
     try {
       const saveResults = await batchSaveData(saveOperations);
-      
-      // 🔧 FIX: Check và log từng operation result
       if (!saveResults || saveResults.length === 0) {
         console.error('❌ Batch save returned no results');
       } else {
@@ -1356,7 +1261,6 @@ export default async function handler(req, res) {
       temperature,
       responseTime: responseTime + 'ms',
       timestamp: new Date().toISOString(),
-      // 🔧 DEBUG: Chỉ trả currentMemory khi có debug flag
       ...(process.env.DEBUG_MODE === 'true' && { 
         currentMemory: userMemory,
         cacheStats: {
