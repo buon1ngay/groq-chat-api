@@ -192,7 +192,7 @@ async function extractSearchKeywords(message) {
       ],
       model: MODELS.search,
       temperature: 0.1,
-      max_tokens: 50
+      max_tokens: 100
     });
     
     const keywords = response.choices[0]?.message?.content?.trim() || message;
@@ -219,7 +219,7 @@ async function summarizeSearchResults(results, question) {
       ],
       model: MODELS.search,
       temperature: 0.3,
-      max_tokens: 500
+      max_tokens: 800
     });
     
     const summary = response.choices[0]?.message?.content || results;
@@ -380,7 +380,7 @@ CHỈ TRẢ YES HOẶC NO.`
         ],
         model: MODELS.search,
         temperature: 0.1,
-        max_tokens: 10
+        max_tokens: 50
       });   
       const ans = response.choices[0]?.message?.content?.trim().toUpperCase();
       return ans.includes('YES');
@@ -663,7 +663,7 @@ Trả về JSON:
       ],
       model: MODELS.memory,
       temperature: 0.1,
-      max_tokens: 400
+      max_tokens: 500
     });
     
     const jsonMatch = (response.choices[0]?.message?.content || '{}').match(/\{[\s\S]*\}/);
@@ -729,7 +729,7 @@ Hãy:
       ],
       model: MODELS.smart,
       temperature: 0.6,
-      max_tokens: 800
+      max_tokens: 1000
     });
     
     return response.choices[0]?.message?.content || null;
@@ -1031,7 +1031,7 @@ async function summarizeHistory(history, userId, conversationId) {
       ],
       model: MODELS.memory,
       temperature: 0.3,
-      max_tokens: 300
+      max_tokens: 400
     });
     
     const recentMessages = history.slice(-10);
@@ -1407,4 +1407,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-          }
+}
