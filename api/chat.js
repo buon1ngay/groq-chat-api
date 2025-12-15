@@ -577,32 +577,83 @@ async function extractMemory(message, currentMemory) {
           role: 'system', 
           content: `Bạn là trợ lý ghi nhớ thông tin. Trích xuất CHÍNH XÁC những gì user YÊU CẦU lưu.
 
-QUY TẮC:
-1. Nếu user nói "lưu", "ghi nhớ", "nhớ giúp tôi" → Lưu CHÍNH XÁC thông tin đó
-2. Nếu user chỉ trò chuyện bình thường → Lưu thông tin cá nhân cơ bản (tên, tuổi, nghề, địa điểm)
-3. Tên field phải rõ ràng, tiếng Anh, snake_case (ví dụ: dog_name, overtime_hours, ex_girlfriend_name)
-4. KHÔNG lưu: mật khẩu, thông tin nhạy cảm, yêu cầu/hành động tạm thời
+QUAN TRỌNG - ĐỌC KỸ:
+1. Nếu user có từ "lưu", "ghi nhớ", "nhớ giúp", "save", "remember" 
+   → LƯU CHÍNH XÁC thông tin sau từ đó
+   → Tạo field name PHÙ HỢP với nội dung
 
-VÍ DỤ:
-✅ "Lưu giúp tôi: con chó tên Buddy, 3 tuổi" 
-   → {"dog_name": "Buddy", "dog_age": 3}
+2. Nếu user chỉ trò chuyện bình thường (không có từ "lưu/nhớ")
+   → CHỈ lưu info cá nhân CƠ BẢN: tên, tuổi, nghề nghiệp, địa điểm
+
+QUY TẮC TẠO FIELD NAME:
+- Tiếng Anh, lowercase, dùng underscore: dog_name, overtime_hours
+- Rõ ràng, mô tả đúng nội dung
+- Tối đa 50 ký tự
+
+VÍ DỤ QUAN TRỌNG:
+
+✅ "Lưu giúp tôi: con chó tên Buddy, 3 tuổi"
+{
+  "hasNewInfo": true,
+  "updates": {
+    "dog_name": "Buddy",
+    "dog_age": 3
+  }
+}
 
 ✅ "Ghi nhớ số giờ tăng ca tháng này: 40 giờ"
-   → {"overtime_hours": 40}
+{
+  "hasNewInfo": true,
+  "updates": {
+    "overtime_hours_this_month": 40
+  }
+}
 
-✅ "Tôi tên Minh, 25 tuổi, làm developer"
-   → {"name": "Minh", "age": 25, "occupation": "Developer"}
+✅ "Nhớ giúp tôi: bạn gái cũ tên Lan, chia tay năm 2020"
+{
+  "hasNewInfo": true,
+  "updates": {
+    "ex_girlfriend_name": "Lan",
+    "breakup_year": 2020
+  }
+}
 
-❌ "Tìm giúp tôi thông tin về Python" 
-   → {"hasNewInfo": false} // Đây là yêu cầu, không phải info cần lưu
+✅ "Lưu password wifi nhà: myWifi123"
+{
+  "hasNewInfo": true,
+  "updates": {
+    "home_wifi_password": "myWifi123"
+  }
+}
 
-CHỉ TRẢ JSON THUẦN.` 
+✅ "Tôi tên Minh, 25 tuổi, làm developer" (KHÔNG có từ "lưu")
+{
+  "hasNewInfo": true,
+  "updates": {
+    "name": "Minh",
+    "age": 25,
+    "occupation": "Developer"
+  }
+}
+
+❌ "Tìm giúp tôi thông tin về Python" (yêu cầu search, không phải lưu info)
+{
+  "hasNewInfo": false
+}
+
+❌ "Hôm nay trời đẹp nhỉ" (trò chuyện thường, không có info cần lưu)
+{
+  "hasNewInfo": false
+}
+
+CHỈ TRẢ JSON, KHÔNG GIẢI THÍCH.` 
         },
         { 
           role: 'user', 
           content: `Phân tích tin nhắn và trích xuất thông tin cần lưu.
 
 TIN NHẮN: "${message}"
+
 THÔNG TIN ĐÃ LƯU: ${JSON.stringify(currentMemory, null, 2)}
 
 Trả về JSON:
@@ -612,7 +663,7 @@ Trả về JSON:
     "field_name": "value",
     ...
   },
-  "summary": "Mô tả ngắn gọn"
+  "summary": "Mô tả ngắn gọn những gì được lưu"
 }` 
         }
       ],
@@ -632,7 +683,7 @@ Trả về JSON:
     
     if (Object.keys(parsed.updates).length === 0) return { hasNewInfo: false };
     
-    // Validate common fields
+    // Validate common fields nếu có
     if (parsed.updates.name) {
       const normalized = parsed.updates.name.trim().toLowerCase();
       parsed.updates.name = normalized.charAt(0).toUpperCase() + normalized.slice(1);
@@ -886,8 +937,19 @@ async function shouldExtractMemory(message) {
   
   if (nonsenseCount > words.length * 0.5) {
     return false;
-  }  
+  }
   
+  // 🔧 CRITICAL FIX: Detect EXPLICIT save commands
+  const EXPLICIT_SAVE_COMMANDS = [
+    /\b(lưu|ghi nhớ|nhớ|ghi lại|save|remember|note)\b.{3,}/i,
+    /\b(hãy|giúp|help).*(lưu|nhớ|ghi|save|remember)/i,
+  ];
+  
+  if (EXPLICIT_SAVE_COMMANDS.some(p => p.test(message))) {
+    return true; // ✅ User YÊU CẦU lưu → LUÔN extract
+  }
+  
+  // Check personal info patterns (as before)
   const PERSONAL_INDICATORS = [
     /(?:tôi|mình|em|con)\s+(?:là|tên|họ|năm nay|tuổi)/i,
     /(?:tôi|mình|em)\s+(?:làm|học|sống ở|ở|thích|yêu|đam mê)/i,
@@ -1334,4 +1396,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-  }
+        }
