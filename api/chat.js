@@ -419,6 +419,109 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError?.message || 'Unknown error'}`);
 }
 
+// 🔧 CRITICAL FIX: Redis Locking để tránh race condition
+async function acquireLock(lockKey, ttl = 5000) {
+  const lockValue = `${Date.now()}-${Math.random()}`;
+  const acquired = await redis.set(lockKey, lockValue, { 
+    ex: Math.ceil(ttl / 1000), 
+    nx: true 
+  });
+  
+  if (acquired) {
+    return lockValue;
+  }
+  
+  // Retry với exponential backoff
+  for (let i = 0; i < 3; i++) {
+    await new Promise(r => setTimeout(r, 100 * Math.pow(2, i)));
+    const retry = await redis.set(lockKey, lockValue, { 
+      ex: Math.ceil(ttl / 1000), 
+      nx: true 
+    });
+    if (retry) return lockValue;
+  }
+  
+  return null;
+}
+
+async function releaseLock(lockKey, lockValue) {
+  try {
+    const current = await redis.get(lockKey);
+    if (current === lockValue) {
+      await redis.del(lockKey);
+      return true;
+    }
+  } catch (e) {
+    console.error('❌ Release lock failed:', e);
+  }
+  return false;
+}
+
+// 🔧 DYNAMIC MEMORY: Cho phép MỌI fields hợp lệ
+const MAX_CUSTOM_FIELDS = 20; // Giới hạn tổng số fields
+const MAX_FIELD_NAME_LENGTH = 50;
+const MAX_FIELD_VALUE_LENGTH = 500;
+
+function isValidFieldName(fieldName) {
+  if (!fieldName || typeof fieldName !== 'string') return false;
+  if (fieldName.length > MAX_FIELD_NAME_LENGTH) return false;
+  
+  // CHỈ check format, KHÔNG chặn content
+  // Allow: letters, numbers, underscore
+  // Must start with letter
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(fieldName)) {
+    console.warn(`⚠️ Invalid field name format: ${fieldName}`);
+    return false;
+  }
+  
+  return true;
+}
+
+function filterMemoryFields(updates, existingMemory = {}) {
+  if (!updates || typeof updates !== 'object') return {};
+  
+  const filtered = {};
+  const currentFieldCount = Object.keys(existingMemory).length;
+  
+  for (const [field, value] of Object.entries(updates)) {
+    // Skip if too many fields already
+    if (currentFieldCount + Object.keys(filtered).length >= MAX_CUSTOM_FIELDS) {
+      console.warn(`⚠️ Max fields limit (${MAX_CUSTOM_FIELDS}) reached`);
+      break;
+    }
+    
+    // Validate field name FORMAT only
+    if (!isValidFieldName(field)) {
+      continue;
+    }
+    
+    // Validate field value
+    if (value === null || value === undefined) continue;
+    
+    if (typeof value === 'string') {
+      if (value.trim().length === 0) continue;
+      if (value.length > MAX_FIELD_VALUE_LENGTH) {
+        filtered[field] = value.substring(0, MAX_FIELD_VALUE_LENGTH);
+        console.warn(`⚠️ Truncated field ${field} to ${MAX_FIELD_VALUE_LENGTH} chars`);
+        continue;
+      }
+    }
+    
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) continue;
+    }
+    
+    if (typeof value === 'object' || typeof value === 'function') {
+      console.warn(`⚠️ Rejected complex type for field: ${field}`);
+      continue;
+    }
+    
+    filtered[field] = value;
+  }
+  
+  return filtered;
+}
+
 // 🔧 FIX: Bỏ check viết hoa, chỉ check cơ bản
 function isValidName(name) {
   if (!name || typeof name !== 'string') return false;
@@ -445,16 +548,48 @@ async function extractMemory(message, currentMemory) {
   try {
     const response = await callGroqWithRetry({
       messages: [
-        { role: 'system', content: 'Bạn là trợ lý phân tích NGHIÊM NGẶT. CHỈ lưu thông tin CÁ NHÂN THẬT, từ chối mọi từ vô nghĩa như kiki, lala, test. CHỈ TRẢ JSON THUẦN.' },
-        { role: 'user', content: `Phân tích tin nhắn và trích xuất CHỈ những thông tin CÁ NHÂN THỰC SỰ của user.
+        { 
+          role: 'system', 
+          content: `Bạn là trợ lý ghi nhớ thông tin. Trích xuất CHÍNH XÁC những gì user YÊU CẦU lưu.
+
+QUY TẮC:
+1. Nếu user nói "lưu", "ghi nhớ", "nhớ giúp tôi" → Lưu CHÍNH XÁC thông tin đó
+2. Nếu user chỉ trò chuyện bình thường → Lưu thông tin cá nhân cơ bản (tên, tuổi, nghề, địa điểm)
+3. Tên field phải rõ ràng, tiếng Anh, snake_case (ví dụ: dog_name, overtime_hours, ex_girlfriend_name)
+4. KHÔNG lưu: mật khẩu, thông tin nhạy cảm, yêu cầu/hành động tạm thời
+
+VÍ DỤ:
+✅ "Lưu giúp tôi: con chó tên Buddy, 3 tuổi" 
+   → {"dog_name": "Buddy", "dog_age": 3}
+
+✅ "Ghi nhớ số giờ tăng ca tháng này: 40 giờ"
+   → {"overtime_hours": 40}
+
+✅ "Tôi tên Minh, 25 tuổi, làm developer"
+   → {"name": "Minh", "age": 25, "occupation": "Developer"}
+
+❌ "Tìm giúp tôi thông tin về Python" 
+   → {"hasNewInfo": false} // Đây là yêu cầu, không phải info cần lưu
+
+CHỉ TRẢ JSON THUẦN.` 
+        },
+        { 
+          role: 'user', 
+          content: `Phân tích tin nhắn và trích xuất thông tin cần lưu.
 
 TIN NHẮN: "${message}"
-THÔNG TIN ĐÃ BIẾT: ${JSON.stringify(currentMemory, null, 2)}
+THÔNG TIN ĐÃ LƯU: ${JSON.stringify(currentMemory, null, 2)}
 
-Quy tắc: CHỈ lưu tên thật (≥2 ký tự), tuổi (0-150), nghề thực tế, địa điểm thật, sở thích thực sự.
-KHÔNG lưu: kiki, lala, test, abc, xyz hoặc yêu cầu/câu hỏi.
-
-Trả về JSON: {"hasNewInfo": true/false, "updates": {...}, "summary": "..."}` }
+Trả về JSON:
+{
+  "hasNewInfo": true/false,
+  "updates": {
+    "field_name": "value",
+    ...
+  },
+  "summary": "Mô tả ngắn gọn"
+}` 
+        }
       ],
       model: MODELS.memory,
       temperature: 0.1,
@@ -467,7 +602,12 @@ Trả về JSON: {"hasNewInfo": true/false, "updates": {...}, "summary": "..."}`
     const parsed = JSON.parse(jsonMatch[0]);
     if (!parsed.hasNewInfo || !parsed.updates) return { hasNewInfo: false };
     
-    // Validate and normalize
+    // 🔧 CRITICAL: Filter với dynamic whitelist
+    parsed.updates = filterMemoryFields(parsed.updates, currentMemory);
+    
+    if (Object.keys(parsed.updates).length === 0) return { hasNewInfo: false };
+    
+    // Validate common fields
     if (parsed.updates.name) {
       const normalized = parsed.updates.name.trim().toLowerCase();
       parsed.updates.name = normalized.charAt(0).toUpperCase() + normalized.slice(1);
@@ -1011,24 +1151,40 @@ export default async function handler(req, res) {
       assistantMessage = "⚠️ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
     }
     
+    // 🔧 CRITICAL FIX: Memory update với Redis locking
     let memoryUpdated = false;
     let memoryUpdateDetails = null;
     
     if (await shouldExtractMemory(sanitizedMessage)) {
-      const memoryExtraction = await extractMemory(sanitizedMessage, userMemory);      
+      const lockKey = `lock:${memoryKey}`;
+      const lockValue = await acquireLock(lockKey, 5000);
       
-      if (memoryExtraction.hasNewInfo && memoryExtraction.updates && Object.keys(memoryExtraction.updates).length > 0) {
-        const newMemory = mergeMemories(userMemory, memoryExtraction.updates);
-        const hasChanges = JSON.stringify(userMemory) !== JSON.stringify(newMemory);
-        
-        if (hasChanges && await saveMemoryWithValidation(memoryKey, newMemory, userMemory)) {
-          memoryUpdated = true;
-          memoryUpdateDetails = {
-            added: Object.keys(memoryExtraction.updates),
-            totalKeys: Object.keys(newMemory).length
-          };
-          userMemory = newMemory;
-          updateMetrics('memoryUpdates');
+      if (!lockValue) {
+        console.warn('⚠️ Could not acquire memory lock, skipping update');
+      } else {
+        try {
+          // 🔧 RE-READ memory sau khi có lock
+          const freshMemory = await safeRedisGet(memoryKey, {});
+          
+          const memoryExtraction = await extractMemory(sanitizedMessage, freshMemory);      
+          
+          if (memoryExtraction.hasNewInfo && memoryExtraction.updates && Object.keys(memoryExtraction.updates).length > 0) {
+            const newMemory = mergeMemories(freshMemory, memoryExtraction.updates);
+            const hasChanges = JSON.stringify(freshMemory) !== JSON.stringify(newMemory);
+            
+            if (hasChanges && await saveMemoryWithValidation(memoryKey, newMemory, freshMemory)) {
+              memoryUpdated = true;
+              memoryUpdateDetails = {
+                added: Object.keys(memoryExtraction.updates),
+                totalKeys: Object.keys(newMemory).length
+              };
+              userMemory = newMemory; // Update local copy
+              updateMetrics('memoryUpdates');
+            }
+          }
+        } finally {
+          // 🔧 CRITICAL: Always release lock
+          await releaseLock(lockKey, lockValue);
         }
       }
     }
