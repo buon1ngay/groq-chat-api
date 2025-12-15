@@ -419,42 +419,55 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
   throw new Error(`❌ Hết ${maxRetries} API keys. Rate limit: ${lastError?.message || 'Unknown error'}`);
 }
 
-// 🔧 CRITICAL FIX: Redis Locking để tránh race condition
+// 🔧 CRITICAL FIX: Redis Locking với Upstash response handling
 async function acquireLock(lockKey, ttl = 5000) {
   const lockValue = `${Date.now()}-${Math.random()}`;
-  const acquired = await redis.set(lockKey, lockValue, { 
-    ex: Math.ceil(ttl / 1000), 
-    nx: true 
-  });
   
-  if (acquired) {
-    return lockValue;
-  }
-  
-  // Retry với exponential backoff
-  for (let i = 0; i < 3; i++) {
-    await new Promise(r => setTimeout(r, 100 * Math.pow(2, i)));
-    const retry = await redis.set(lockKey, lockValue, { 
+  try {
+    const result = await redis.set(lockKey, lockValue, { 
       ex: Math.ceil(ttl / 1000), 
       nx: true 
     });
-    if (retry) return lockValue;
+    
+    // 🔧 FIX: Upstash trả về "OK" (string) khi success, null khi fail
+    if (result === "OK") {
+      return lockValue;
+    }
+    
+    // Retry với exponential backoff
+    for (let i = 0; i < 3; i++) {
+      await new Promise(r => setTimeout(r, 100 * Math.pow(2, i)));
+      
+      const retryResult = await redis.set(lockKey, lockValue, { 
+        ex: Math.ceil(ttl / 1000), 
+        nx: true 
+      });
+      
+      if (retryResult === "OK") {
+        return lockValue;
+      }
+    }
+    
+    return null;
+  } catch (e) {
+    console.error('❌ acquireLock error:', e);
+    return null;
   }
-  
-  return null;
 }
 
 async function releaseLock(lockKey, lockValue) {
   try {
     const current = await redis.get(lockKey);
     if (current === lockValue) {
-      await redis.del(lockKey);
-      return true;
+      const result = await redis.del(lockKey);
+      // 🔧 FIX: DEL trả về số lượng keys deleted (1 hoặc 0)
+      return result === 1 || result === "1";
     }
+    return false;
   } catch (e) {
-    console.error('❌ Release lock failed:', e);
+    console.error('❌ releaseLock error:', e);
+    return false;
   }
-  return false;
 }
 
 // 🔧 DYNAMIC MEMORY: Cho phép MỌI fields hợp lệ
@@ -478,7 +491,12 @@ function isValidFieldName(fieldName) {
 }
 
 function filterMemoryFields(updates, existingMemory = {}) {
-  if (!updates || typeof updates !== 'object') return {};
+  if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return {};
+  
+  // 🔧 FIX: Validate existingMemory
+  if (!existingMemory || typeof existingMemory !== 'object' || Array.isArray(existingMemory)) {
+    existingMemory = {};
+  }
   
   const filtered = {};
   const currentFieldCount = Object.keys(existingMemory).length;
@@ -509,6 +527,13 @@ function filterMemoryFields(updates, existingMemory = {}) {
     
     if (typeof value === 'number') {
       if (!Number.isFinite(value)) continue;
+    }
+    
+    // 🔧 ADD: Reject boolean (ambiguous)
+    if (typeof value === 'boolean') {
+      // Convert to string for clarity
+      filtered[field] = value ? 'true' : 'false';
+      continue;
     }
     
     if (typeof value === 'object' || typeof value === 'function') {
@@ -754,12 +779,16 @@ async function safeRedisSet(key, value, expirySeconds = null) {
   
   try {
     const stringified = typeof value === 'string' ? value : JSON.stringify(value);
+    
+    let result;
     if (expirySeconds) {
-      await redisWithTimeout(redis.set(key, stringified, { ex: expirySeconds }));
+      result = await redisWithTimeout(redis.set(key, stringified, { ex: expirySeconds }));
     } else {
-      await redisWithTimeout(redis.set(key, stringified));
+      result = await redisWithTimeout(redis.set(key, stringified));
     }
-    return true;
+    
+    // 🔧 FIX: Upstash trả về "OK" hoặc null
+    return result === "OK";
   } catch (e) {
     console.error(`❌ Redis SET failed for key ${key}:`, e?.message || e);
     return false;
@@ -773,14 +802,36 @@ async function saveMemoryWithValidation(memoryKey, newMemory, oldMemory) {
   
   try {
     const saved = await safeRedisSet(memoryKey, newMemory, 31536000);
-    if (!saved) return false;
+    if (!saved) {
+      console.error('❌ Failed to save memory to Redis');
+      return false;
+    }
     
-    await new Promise(r => setTimeout(r, 100));
+    // 🔧 FIX: Wait for Redis to commit (increase to 200ms for Upstash)
+    await new Promise(r => setTimeout(r, 200));
     
     const verified = await safeRedisGet(memoryKey);
-    if (!verified || Object.keys(verified).length !== Object.keys(newMemory).length) {
-      console.error('❌ Memory verification failed');
+    if (!verified || typeof verified !== 'object') {
+      console.error('❌ Memory verification failed - invalid response');
       return false;
+    }
+    
+    const verifiedKeys = Object.keys(verified);
+    const expectedKeys = Object.keys(newMemory);
+    
+    if (verifiedKeys.length !== expectedKeys.length) {
+      console.error('❌ Memory verification failed - key count mismatch');
+      console.error('Expected keys:', expectedKeys);
+      console.error('Got keys:', verifiedKeys);
+      return false;
+    }
+    
+    // 🔧 ADD: Verify each key exists
+    for (const key of expectedKeys) {
+      if (!(key in verified)) {
+        console.error(`❌ Memory verification failed - missing key: ${key}`);
+        return false;
+      }
     }
     
     return true;
@@ -937,14 +988,21 @@ async function batchSaveData(operations) {
   
   const promises = operations.map(async ({ key, value, ttl }) => {
     try {
-      return await safeRedisSet(key, value, ttl);
+      const result = await safeRedisSet(key, value, ttl);
+      return result; // true/false
     } catch (e) {
       console.error(`❌ Failed to save ${key}:`, e);
       return false;
     }
   });
   
-  return await Promise.all(promises);
+  const results = await Promise.all(promises);
+  
+  // 🔧 ADD: Log summary
+  const successCount = results.filter(r => r === true).length;
+  console.log(`📦 Batch save: ${successCount}/${operations.length} successful`);
+  
+  return results;
 }
 
 const metrics = {
@@ -1276,4 +1334,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-}
+  }
