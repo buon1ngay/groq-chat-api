@@ -575,18 +575,14 @@ async function extractMemory(message, currentMemory) {
       messages: [
         { 
           role: 'system', 
-          content: `Bạn là trợ lý ghi nhớ thông tin. Trích xuất CHÍNH XÁC những gì user YÊU CẦU lưu.
+          content: `Bạn là trợ lý ghi nhớ thông tin. Trích xuất CHÍNH XÁC những gì user YÊU CẦU lưu trong ngữ cảnh.
 
 QUAN TRỌNG - ĐỌC KỸ:
-1. Nếu user có từ "lưu", "ghi nhớ", "nhớ giúp", "ghi lại", "cập nhật" 
-   → LƯU CHÍNH XÁC thông tin sau từ đó
-   → Tạo field name PHÙ HỢP với nội dung
-2. Nếu user có từ "xóa", "bỏ", "đổi", "thay"
-   → Đánh dấu field cần xóa bằng giá trị "__DELETE__"
-3. Nếu user có từ "sửa", "cập nhật", "update", "thay đổi" hoặc nhắc đến nội dung liên quan đến fields đã có giá trị "__DELETE__"
+1. LƯU CHÍNH XÁC thông tin. Tạo field name PHÙ HỢP với nội dung
+2. Nếu user yêu cầu xóa. Đánh dấu field cần xóa bằng giá trị "__DELETE__"
+3. Nếu user yêu cầu thay đổi hoặc nhắc đến nội dung liên quan đến fields đã có giá trị "__DELETE__"
    → Trả về giá trị MỚI cho field đó (sẽ ghi đè)
-4. Nếu user chỉ trò chuyện bình thường (không có từ "đổi/thay/lưu/nhớ/sửa/xóa")
-   → CHỈ lưu info cá nhân CƠ BẢN: tên, tuổi, nghề nghiệp, địa điểm
+4. Nếu user chỉ trò chuyện bình thường. CHỈ lưu info cá nhân CƠ BẢN: tên, tuổi, nghề nghiệp, địa điểm, thông tin gia đình, sức khỏe.
 
 QUY TẮC TẠO FIELD NAME:
 - Tiếng Anh, lowercase, dùng underscore
@@ -597,9 +593,7 @@ QUY TẮC TẠO FIELD NAME:
   ❌ SAI: pet_name (không rõ là chó hay mèo)
 - Rõ ràng, mô tả đúng nội dung
 - Tối đa 50 ký tự
-
 VÍ DỤ QUAN TRỌNG:
-
 ✅ THÊM MỚI - ĐƠN GIẢN:
 "Lưu giúp tôi: con chó tên Buddy, 3 tuổi"
 {
