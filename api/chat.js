@@ -1308,9 +1308,6 @@ export default async function handler(req, res) {
     if (usedSearch === false && intent.needsSearch && !searchResults) {
       assistantMessage = "⚠️ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
     }
-    
-    // 🔧 CRITICAL FIX: Memory update với Redis locking
-    let memoryUpdated = false;
     // 🔧 CRITICAL FIX: Memory update với Redis locking
     let memoryUpdated = false;
     let memoryUpdateDetails = null;
@@ -1451,4 +1448,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-      }
+  }
