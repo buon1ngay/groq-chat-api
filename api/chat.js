@@ -159,7 +159,7 @@ function checkRateLimit(userId) {
   const recentRequests = userRequests.filter(t => now - t < 60000);
   
   if (recentRequests.length >= 30) {
-    throw new Error('⚠️ Quá nhiều yêu cầu. Vui lòng đợi 1 phút.');
+    throw new Error('⚠ Quá nhiều yêu cầu. Vui lòng đợi 1 phút.');
   }
   
   recentRequests.push(now);
@@ -231,7 +231,7 @@ async function summarizeSearchResults(results, question) {
 
 async function searchWeb(query) {
   if (!SEARCH_APIS.length) {
-    console.warn('⚠️ No search APIs available');
+    console.warn('⚠ No search APIs available');
     return null;
   }
   
@@ -409,7 +409,7 @@ async function callGroqWithRetry(config, maxRetries = API_KEYS.length) {
         throw new Error('❌ Request không hợp lệ: ' + (e?.message || 'Unknown error'));
       }    
       if (e.status === 429 || e?.message?.includes('rate_limit')) {
-        console.warn(`⚠️ Rate limit key ${lastGroqKeyIndex}, trying next...`);
+        console.warn(`⚠ Rate limit key ${lastGroqKeyIndex}, trying next...`);
         continue;
       }
       
@@ -483,7 +483,7 @@ function isValidFieldName(fieldName) {
   // Allow: letters, numbers, underscore
   // Must start with letter
   if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(fieldName)) {
-    console.warn(`⚠️ Invalid field name format: ${fieldName}`);
+    console.warn(`⚠ Invalid field name format: ${fieldName}`);
     return false;
   }
   
@@ -504,7 +504,7 @@ function filterMemoryFields(updates, existingMemory = {}) {
   for (const [field, value] of Object.entries(updates)) {
     // Skip if too many fields already
     if (currentFieldCount + Object.keys(filtered).length >= MAX_CUSTOM_FIELDS) {
-      console.warn(`⚠️ Max fields limit (${MAX_CUSTOM_FIELDS}) reached`);
+      console.warn(`⚠ Max fields limit (${MAX_CUSTOM_FIELDS}) reached`);
       break;
     }
     
@@ -520,7 +520,7 @@ function filterMemoryFields(updates, existingMemory = {}) {
       if (value.trim().length === 0) continue;
       if (value.length > MAX_FIELD_VALUE_LENGTH) {
         filtered[field] = value.substring(0, MAX_FIELD_VALUE_LENGTH);
-        console.warn(`⚠️ Truncated field ${field} to ${MAX_FIELD_VALUE_LENGTH} chars`);
+        console.warn(`⚠ Truncated field ${field} to ${MAX_FIELD_VALUE_LENGTH} chars`);
         continue;
       }
     }
@@ -537,7 +537,7 @@ function filterMemoryFields(updates, existingMemory = {}) {
     }
     
     if (typeof value === 'object' || typeof value === 'function') {
-      console.warn(`⚠️ Rejected complex type for field: ${field}`);
+      console.warn(`⚠ Rejected complex type for field: ${field}`);
       continue;
     }
     
@@ -575,26 +575,30 @@ async function extractMemory(message, currentMemory) {
       messages: [
         { 
           role: 'system', 
-          content: `Bạn là trợ lý ghi nhớ thông tin. Trích xuất CHÍNH XÁC những gì user YÊU CẦU lưu trong ngữ cảnh.
+          content: `Bạn là trợ lý ghi nhớ thông tin. Trích xuất CHÍNH XÁC những gì user YÊU CẦU lưu.
 
 QUAN TRỌNG - ĐỌC KỸ:
-1. LƯU CHÍNH XÁC thông tin. Tạo field name PHÙ HỢP với nội dung
-2. Nếu user yêu cầu xóa. Đánh dấu field cần xóa bằng giá trị "__DELETE__"
-3. Nếu user yêu cầu thay đổi hoặc nhắc đến nội dung liên quan đến fields đã có giá trị "__DELETE__"
+1. Nếu user có từ "lưu", "ghi nhớ", "nhớ giúp", "save", "remember" 
+   → LƯU CHÍNH XÁC thông tin sau từ đó
+   → Tạo field name PHÙ HỢP với nội dung
+
+2. Nếu user có từ "xóa", "bỏ", "delete", "remove"
+   → Đánh dấu field cần xóa bằng giá trị "__DELETE__"
+
+3. Nếu user có từ "sửa", "cập nhật", "update", "thay đổi"
    → Trả về giá trị MỚI cho field đó (sẽ ghi đè)
-4. Nếu user chỉ trò chuyện bình thường. CHỈ lưu info cá nhân CƠ BẢN: tên, tuổi, nghề nghiệp, địa điểm, thông tin gia đình, sức khỏe.
+
+4. Nếu user chỉ trò chuyện bình thường (không có từ "lưu/nhớ/sửa/xóa")
+   → CHỈ lưu info cá nhân CƠ BẢN: tên, tuổi, nghề nghiệp, địa điểm
 
 QUY TẮC TẠO FIELD NAME:
-- Tiếng Anh, lowercase, dùng underscore
-- **NẾU CÓ NHIỀU ĐỐI TƯỢNG CÙNG LOẠI**: Thêm số thứ tự hoặc tên riêng
-  ✅ Đúng: dog1_name, dog2_name HOẶC dog_xoai_name, dog_gau_name
-  ✅ Đúng: child1_age, child2_age HOẶC son_age, daughter_age
-  ❌ SAI: dog_name (cho 2 con chó khác nhau)
-  ❌ SAI: pet_name (không rõ là chó hay mèo)
+- Tiếng Anh, lowercase, dùng underscore: dog_name, overtime_hours
 - Rõ ràng, mô tả đúng nội dung
 - Tối đa 50 ký tự
+
 VÍ DỤ QUAN TRỌNG:
-✅ THÊM MỚI - ĐƠN GIẢN:
+
+✅ THÊM MỚI:
 "Lưu giúp tôi: con chó tên Buddy, 3 tuổi"
 {
   "hasNewInfo": true,
@@ -603,17 +607,7 @@ VÍ DỤ QUAN TRỌNG:
     "dog_age": 3
   }
 }
-✅ THÊM MỚI - NHIỀU ĐỐI TƯỢNG:
-"Lưu: con chó thứ nhất tên Xoài sinh 11/9, con thứ hai tên Gấu sinh 15/10"
-{
-  "hasNewInfo": true,
-  "updates": {
-    "dog1_name": "Xoài",
-    "dog1_birthdate": "11/9",
-    "dog2_name": "Gấu",
-    "dog2_birthdate": "15/10"
-  }
-}
+
 ✅ CẬP NHẬT:
 "Sửa tuổi của tôi thành 26"
 {
@@ -622,7 +616,8 @@ VÍ DỤ QUAN TRỌNG:
     "age": 26
   }
 }
-✅ XÓA TẤT CẢ:
+
+✅ XÓA:
 "Xóa thông tin con chó"
 {
   "hasNewInfo": true,
@@ -631,28 +626,20 @@ VÍ DỤ QUAN TRỌNG:
     "dog_age": "__DELETE__"
   }
 }
-✅ XÓA CỤ THỂ:
-"Xóa thông tin con chó Xoài"
+
+✅ "Bỏ số giờ tăng ca"
 {
   "hasNewInfo": true,
   "updates": {
-    "dog1_name": "__DELETE__",
-    "dog1_birthdate": "__DELETE__"
+    "overtime_hours_this_month": "__DELETE__"
   }
 }
-✅ XÓA VÀ THÊM MỚI:
-"Xóa tên cũ, lưu tên mới là Alice"
-{
-  "hasNewInfo": true,
-  "updates": {
-    "name": "Alice"
-  },
-  "summary": "Đã cập nhật tên mới"
-}
-❌ "Tìm giúp tôi thông tin về Python" (yêu cầu search, không phải lưu)
+
+❌ "Tìm giúp tôi thông tin về Python" (yêu cầu search, không phải lưu info)
 {
   "hasNewInfo": false
 }
+
 CHỈ TRẢ JSON, KHÔNG GIẢI THÍCH.` 
         },
         { 
@@ -754,6 +741,7 @@ Hãy:
 
 function buildSystemPrompt(memory, searchResults = null, intent = null, deepThought = null) {
   let prompt = `Bạn là KAMI, một AI thông minh, được tạo ra bởi Nguyễn Đức Thạnh.
+
 NGUYÊN TẮC:
 1. Ngôn ngữ & Phong cách: Trả lời bằng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác. Xưng "tôi" hoặc theo cách user yêu cầu, gọi user tùy tiền tố họ chọn. Giọng điệu thân thiện nhưng chuyên nghiệp.
 2. Độ chính xác cao: 
@@ -782,16 +770,16 @@ NGUYÊN TẮC:
     } else if (intent.type === 'explanation') {
       prompt += '\n📚 Chế độ giải thích: Phân tích từng bước, dùng ví dụ dễ hiểu, so sánh tương đồng.';
     } else if (intent.type === 'comparison') {
-      prompt += '\n⚖️ Chế độ so sánh: Phân tích ưu/nhược điểm, đưa ra bảng so sánh nếu có thể.';
+      prompt += '\n⚖ Chế độ so sánh: Phân tích ưu/nhược điểm, đưa ra bảng so sánh nếu có thể.';
     }
   }
   
   if (deepThought) {
-    prompt += `\n\n🧠 PHÂN TÍCH SÂU:\n${deepThought}\n\n⚠️ Dùng phân tích trên làm nền tảng cho câu trả lời.`;
+    prompt += `\n\n🧠 PHÂN TÍCH SÂU:\n${deepThought}\n\n⚠ Dùng phân tích trên làm nền tảng cho câu trả lời.`;
   }
   
   if (searchResults) {
-    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM CẬP NHẬT:\n${searchResults}\n\n⚠️ QUAN TRỌNG: Ưu tiên dùng dữ liệu mới nhất này.`;
+    prompt += `\n\n📊 DỮ LIỆU TÌM KIẾM CẬP NHẬT:\n${searchResults}\n\n⚠ QUAN TRỌNG: Ưu tiên dùng dữ liệu mới nhất này.`;
   }
   
   if (Object.keys(memory).length) {
@@ -831,7 +819,7 @@ async function safeRedisSet(key, value, expirySeconds = null) {
   }
   
   if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) {
-    console.warn(`⚠️ Attempted to save empty value for key ${key}`);
+    console.warn(`⚠ Attempted to save empty value for key ${key}`);
     return false;
   }
   
@@ -911,18 +899,17 @@ function mergeMemories(oldMemory, newUpdates) {
   const merged = { ...oldMemory };
   
   for (const [key, value] of Object.entries(newUpdates)) {
-    // ✅ CRITICAL: Xóa field nếu value là "__DELETE__"
-    if (value === "__DELETE__") {
-      delete merged[key];
-      console.log(`🗑️ Deleted field: ${key}`);
-      continue;
-    }
+    // Skip null/undefined values
     if (value === null || value === undefined) {
       continue;
     }
+    
+    // Skip empty strings
     if (typeof value === 'string' && value.trim().length === 0) {
       continue;
     }
+    
+    // Update value
     merged[key] = value;
   }
   
@@ -1068,7 +1055,7 @@ async function summarizeHistory(history, userId, conversationId) {
 // 🔧 OPTIMIZATION: Batch Redis operations để giảm latency
 async function batchSaveData(operations) {
   if (!operations || operations.length === 0) {
-    console.warn('⚠️ No operations to save');
+    console.warn('⚠ No operations to save');
     return [];
   }
   
@@ -1145,6 +1132,8 @@ export default async function handler(req, res) {
     updateMetrics('totalRequests');
     
     const { message, userId = 'default', conversationId = 'default' } = req.body;
+    
+    // 🔧 FIX: Validate and sanitize userId and conversationId
     const sanitizedUserId = (userId && typeof userId === 'string') 
       ? userId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 100) || 'default'
       : 'default';
@@ -1175,10 +1164,13 @@ export default async function handler(req, res) {
         retryAfter: 60 
       });
     }
+
     const chatKey = `chat:${sanitizedUserId}:${sanitizedConversationId}`;
     const memoryKey = `memory:${sanitizedUserId}`;
     
     let conversationHistory, userMemory;
+    
+    // 🔧 FIX: Load cả 2 parallel với better error handling
     try {
       const results = await redisWithTimeout(redis.mget(chatKey, memoryKey));
       
@@ -1287,8 +1279,9 @@ export default async function handler(req, res) {
     let assistantMessage = chatCompletion.choices[0]?.message?.content || 'Xin lỗi, tôi không thể tạo phản hồi.';
     
     if (usedSearch === false && intent.needsSearch && !searchResults) {
-      assistantMessage = "⚠️ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
+      assistantMessage = "⚠ Không thể tìm kiếm thông tin mới nhất, câu trả lời dựa trên kiến thức có sẵn:\n\n" + assistantMessage;
     }
+    
     // 🔧 CRITICAL FIX: Memory update với Redis locking
     let memoryUpdated = false;
     let memoryUpdateDetails = null;
@@ -1298,42 +1291,26 @@ export default async function handler(req, res) {
       const lockValue = await acquireLock(lockKey, 5000);
       
       if (!lockValue) {
-        console.warn('⚠️ Could not acquire memory lock, skipping update');
+        console.warn('⚠ Could not acquire memory lock, skipping update');
       } else {
         try {
           // 🔧 RE-READ memory sau khi có lock
           const freshMemory = await safeRedisGet(memoryKey, {});
           
-          const memoryExtraction = await extractMemory(sanitizedMessage, freshMemory);
+          const memoryExtraction = await extractMemory(sanitizedMessage, freshMemory);      
           
           if (memoryExtraction.hasNewInfo && memoryExtraction.updates && Object.keys(memoryExtraction.updates).length > 0) {
-            console.log('📝 Memory extraction result:', memoryExtraction);
-            console.log('🔄 Fresh memory before merge:', freshMemory);
-            
             const newMemory = mergeMemories(freshMemory, memoryExtraction.updates);
-            
-            console.log('✅ New memory after merge:', newMemory);
-            
             const hasChanges = JSON.stringify(freshMemory) !== JSON.stringify(newMemory);
             
-            if (hasChanges) {
-              const saved = await saveMemoryWithValidation(memoryKey, newMemory, freshMemory);
-              
-              if (saved) {
-                console.log('💾 Successfully saved to Redis');
-                memoryUpdated = true;
-                memoryUpdateDetails = {
-                  added: Object.keys(memoryExtraction.updates).filter(k => memoryExtraction.updates[k] !== "__DELETE__"),
-                  deleted: Object.keys(memoryExtraction.updates).filter(k => memoryExtraction.updates[k] === "__DELETE__"),
-                  totalKeys: Object.keys(newMemory).length
-                };
-                userMemory = newMemory; // Update local copy
-                updateMetrics('memoryUpdates');
-              } else {
-                console.error('❌ Failed to save memory to Redis');
-              }
-            } else {
-              console.log('ℹ️ No changes detected after merge');
+            if (hasChanges && await saveMemoryWithValidation(memoryKey, newMemory, freshMemory)) {
+              memoryUpdated = true;
+              memoryUpdateDetails = {
+                added: Object.keys(memoryExtraction.updates),
+                totalKeys: Object.keys(newMemory).length
+              };
+              userMemory = newMemory; // Update local copy
+              updateMetrics('memoryUpdates');
             }
           }
         } finally {
@@ -1342,6 +1319,7 @@ export default async function handler(req, res) {
         }
       }
     }
+    
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
     
     // 🔧 OPTIMIZATION: Batch save để giảm latency
@@ -1409,7 +1387,7 @@ export default async function handler(req, res) {
     let statusCode = 500;
     
     if (error?.message?.includes('rate_limit') || error?.message?.includes('Rate limit')) {
-      errMsg = '⚠️ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau.';
+      errMsg = '⚠ Tất cả API keys đã vượt giới hạn. Vui lòng thử lại sau.';
       statusCode = 429;
     } else if (error?.message?.includes('Request quá lớn')) {
       statusCode = 413;
@@ -1429,4 +1407,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-        }
+          }
