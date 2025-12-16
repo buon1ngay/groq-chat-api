@@ -578,14 +578,14 @@ async function extractMemory(message, currentMemory) {
           content: `Bạn là trợ lý ghi nhớ thông tin. Trích xuất CHÍNH XÁC những gì user YÊU CẦU lưu.
 
 QUAN TRỌNG - ĐỌC KỸ:
-1. Nếu user có từ "lưu", "ghi nhớ", "nhớ giúp", "save", "remember" 
+1. Nếu user có từ "lưu", "ghi nhớ", "nhớ giúp", "ghi lại", "cập nhật" 
    → LƯU CHÍNH XÁC thông tin sau từ đó
    → Tạo field name PHÙ HỢP với nội dung
-2. Nếu user có từ "xóa", "bỏ", "delete", "remove"
+2. Nếu user có từ "xóa", "bỏ", "đổi", "thay"
    → Đánh dấu field cần xóa bằng giá trị "__DELETE__"
-3. Nếu user có từ "sửa", "cập nhật", "update", "thay đổi"
+3. Nếu user có từ "sửa", "cập nhật", "update", "thay đổi" hoặc nhắc đến nội dung liên quan đến fields đã có giá trị "__DELETE__"
    → Trả về giá trị MỚI cho field đó (sẽ ghi đè)
-4. Nếu user chỉ trò chuyện bình thường (không có từ "lưu/nhớ/sửa/xóa")
+4. Nếu user chỉ trò chuyện bình thường (không có từ "đổi/thay/lưu/nhớ/sửa/xóa")
    → CHỈ lưu info cá nhân CƠ BẢN: tên, tuổi, nghề nghiệp, địa điểm
 
 QUY TẮC TẠO FIELD NAME:
@@ -609,19 +609,17 @@ VÍ DỤ QUAN TRỌNG:
     "dog_age": 3
   }
 }
-
 ✅ THÊM MỚI - NHIỀU ĐỐI TƯỢNG:
 "Lưu: con chó thứ nhất tên Xoài sinh 11/9, con thứ hai tên Gấu sinh 15/10"
 {
   "hasNewInfo": true,
   "updates": {
     "dog1_name": "Xoài",
-    "dog1_birthdate": "11/9/2025",
+    "dog1_birthdate": "11/9",
     "dog2_name": "Gấu",
-    "dog2_birthdate": "15/10/2025"
+    "dog2_birthdate": "15/10"
   }
 }
-
 ✅ CẬP NHẬT:
 "Sửa tuổi của tôi thành 26"
 {
@@ -630,7 +628,6 @@ VÍ DỤ QUAN TRỌNG:
     "age": 26
   }
 }
-
 ✅ XÓA TẤT CẢ:
 "Xóa thông tin con chó"
 {
@@ -640,7 +637,6 @@ VÍ DỤ QUAN TRỌNG:
     "dog_age": "__DELETE__"
   }
 }
-
 ✅ XÓA CỤ THỂ:
 "Xóa thông tin con chó Xoài"
 {
@@ -650,7 +646,6 @@ VÍ DỤ QUAN TRỌNG:
     "dog1_birthdate": "__DELETE__"
   }
 }
-
 ✅ XÓA VÀ THÊM MỚI:
 "Xóa tên cũ, lưu tên mới là Alice"
 {
@@ -660,12 +655,10 @@ VÍ DỤ QUAN TRỌNG:
   },
   "summary": "Đã cập nhật tên mới"
 }
-
 ❌ "Tìm giúp tôi thông tin về Python" (yêu cầu search, không phải lưu)
 {
   "hasNewInfo": false
 }
-
 CHỈ TRẢ JSON, KHÔNG GIẢI THÍCH.` 
         },
         { 
@@ -767,7 +760,6 @@ Hãy:
 
 function buildSystemPrompt(memory, searchResults = null, intent = null, deepThought = null) {
   let prompt = `Bạn là KAMI, một AI thông minh, được tạo ra bởi Nguyễn Đức Thạnh.
-
 NGUYÊN TẮC:
 1. Ngôn ngữ & Phong cách: Trả lời bằng tiếng Việt trừ khi được yêu cầu ngôn ngữ khác. Xưng "tôi" hoặc theo cách user yêu cầu, gọi user tùy tiền tố họ chọn. Giọng điệu thân thiện nhưng chuyên nghiệp.
 2. Độ chính xác cao: 
@@ -1159,8 +1151,6 @@ export default async function handler(req, res) {
     updateMetrics('totalRequests');
     
     const { message, userId = 'default', conversationId = 'default' } = req.body;
-    
-    // 🔧 FIX: Validate and sanitize userId and conversationId
     const sanitizedUserId = (userId && typeof userId === 'string') 
       ? userId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 100) || 'default'
       : 'default';
@@ -1191,13 +1181,10 @@ export default async function handler(req, res) {
         retryAfter: 60 
       });
     }
-
     const chatKey = `chat:${sanitizedUserId}:${sanitizedConversationId}`;
     const memoryKey = `memory:${sanitizedUserId}`;
     
     let conversationHistory, userMemory;
-    
-    // 🔧 FIX: Load cả 2 parallel với better error handling
     try {
       const results = await redisWithTimeout(redis.mget(chatKey, memoryKey));
       
@@ -1448,4 +1435,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-  }
+        }
