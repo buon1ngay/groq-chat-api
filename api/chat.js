@@ -1,4 +1,3 @@
-
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
@@ -1452,4 +1451,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-  }
+      }
