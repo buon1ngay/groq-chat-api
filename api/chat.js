@@ -1,3 +1,4 @@
+
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
@@ -581,30 +582,44 @@ QUAN TRỌNG - ĐỌC KỸ:
 1. Nếu user có từ "lưu", "ghi nhớ", "nhớ giúp", "save", "remember" 
    → LƯU CHÍNH XÁC thông tin sau từ đó
    → Tạo field name PHÙ HỢP với nội dung
-
 2. Nếu user có từ "xóa", "bỏ", "delete", "remove"
    → Đánh dấu field cần xóa bằng giá trị "__DELETE__"
-
 3. Nếu user có từ "sửa", "cập nhật", "update", "thay đổi"
    → Trả về giá trị MỚI cho field đó (sẽ ghi đè)
-
 4. Nếu user chỉ trò chuyện bình thường (không có từ "lưu/nhớ/sửa/xóa")
    → CHỈ lưu info cá nhân CƠ BẢN: tên, tuổi, nghề nghiệp, địa điểm
 
 QUY TẮC TẠO FIELD NAME:
-- Tiếng Anh, lowercase, dùng underscore: dog_name, overtime_hours
+- Tiếng Anh, lowercase, dùng underscore
+- **NẾU CÓ NHIỀU ĐỐI TƯỢNG CÙNG LOẠI**: Thêm số thứ tự hoặc tên riêng
+  ✅ Đúng: dog1_name, dog2_name HOẶC dog_xoai_name, dog_gau_name
+  ✅ Đúng: child1_age, child2_age HOẶC son_age, daughter_age
+  ❌ SAI: dog_name (cho 2 con chó khác nhau)
+  ❌ SAI: pet_name (không rõ là chó hay mèo)
 - Rõ ràng, mô tả đúng nội dung
 - Tối đa 50 ký tự
 
 VÍ DỤ QUAN TRỌNG:
 
-✅ THÊM MỚI:
+✅ THÊM MỚI - ĐƠN GIẢN:
 "Lưu giúp tôi: con chó tên Buddy, 3 tuổi"
 {
   "hasNewInfo": true,
   "updates": {
     "dog_name": "Buddy",
     "dog_age": 3
+  }
+}
+
+✅ THÊM MỚI - NHIỀU ĐỐI TƯỢNG:
+"Lưu: con chó thứ nhất tên Xoài sinh 11/9, con thứ hai tên Gấu sinh 15/10"
+{
+  "hasNewInfo": true,
+  "updates": {
+    "dog1_name": "Xoài",
+    "dog1_birthdate": "11/9/2025",
+    "dog2_name": "Gấu",
+    "dog2_birthdate": "15/10/2025"
   }
 }
 
@@ -617,7 +632,7 @@ VÍ DỤ QUAN TRỌNG:
   }
 }
 
-✅ XÓA:
+✅ XÓA TẤT CẢ:
 "Xóa thông tin con chó"
 {
   "hasNewInfo": true,
@@ -627,15 +642,27 @@ VÍ DỤ QUAN TRỌNG:
   }
 }
 
-✅ "Bỏ số giờ tăng ca"
+✅ XÓA CỤ THỂ:
+"Xóa thông tin con chó Xoài"
 {
   "hasNewInfo": true,
   "updates": {
-    "overtime_hours_this_month": "__DELETE__"
+    "dog1_name": "__DELETE__",
+    "dog1_birthdate": "__DELETE__"
   }
 }
 
-❌ "Tìm giúp tôi thông tin về Python" (yêu cầu search, không phải lưu info)
+✅ XÓA VÀ THÊM MỚI:
+"Xóa tên cũ, lưu tên mới là Alice"
+{
+  "hasNewInfo": true,
+  "updates": {
+    "name": "Alice"
+  },
+  "summary": "Đã cập nhật tên mới"
+}
+
+❌ "Tìm giúp tôi thông tin về Python" (yêu cầu search, không phải lưu)
 {
   "hasNewInfo": false
 }
@@ -899,17 +926,18 @@ function mergeMemories(oldMemory, newUpdates) {
   const merged = { ...oldMemory };
   
   for (const [key, value] of Object.entries(newUpdates)) {
-    // Skip null/undefined values
+    // ✅ CRITICAL: Xóa field nếu value là "__DELETE__"
+    if (value === "__DELETE__") {
+      delete merged[key];
+      console.log(`🗑️ Deleted field: ${key}`);
+      continue;
+    }
     if (value === null || value === undefined) {
       continue;
     }
-    
-    // Skip empty strings
     if (typeof value === 'string' && value.trim().length === 0) {
       continue;
     }
-    
-    // Update value
     merged[key] = value;
   }
   
@@ -1284,6 +1312,8 @@ export default async function handler(req, res) {
     
     // 🔧 CRITICAL FIX: Memory update với Redis locking
     let memoryUpdated = false;
+    // 🔧 CRITICAL FIX: Memory update với Redis locking
+    let memoryUpdated = false;
     let memoryUpdateDetails = null;
     
     if (await shouldExtractMemory(sanitizedMessage)) {
@@ -1297,20 +1327,36 @@ export default async function handler(req, res) {
           // 🔧 RE-READ memory sau khi có lock
           const freshMemory = await safeRedisGet(memoryKey, {});
           
-          const memoryExtraction = await extractMemory(sanitizedMessage, freshMemory);      
+          const memoryExtraction = await extractMemory(sanitizedMessage, freshMemory);
           
           if (memoryExtraction.hasNewInfo && memoryExtraction.updates && Object.keys(memoryExtraction.updates).length > 0) {
+            console.log('📝 Memory extraction result:', memoryExtraction);
+            console.log('🔄 Fresh memory before merge:', freshMemory);
+            
             const newMemory = mergeMemories(freshMemory, memoryExtraction.updates);
+            
+            console.log('✅ New memory after merge:', newMemory);
+            
             const hasChanges = JSON.stringify(freshMemory) !== JSON.stringify(newMemory);
             
-            if (hasChanges && await saveMemoryWithValidation(memoryKey, newMemory, freshMemory)) {
-              memoryUpdated = true;
-              memoryUpdateDetails = {
-                added: Object.keys(memoryExtraction.updates),
-                totalKeys: Object.keys(newMemory).length
-              };
-              userMemory = newMemory; // Update local copy
-              updateMetrics('memoryUpdates');
+            if (hasChanges) {
+              const saved = await saveMemoryWithValidation(memoryKey, newMemory, freshMemory);
+              
+              if (saved) {
+                console.log('💾 Successfully saved to Redis');
+                memoryUpdated = true;
+                memoryUpdateDetails = {
+                  added: Object.keys(memoryExtraction.updates).filter(k => memoryExtraction.updates[k] !== "__DELETE__"),
+                  deleted: Object.keys(memoryExtraction.updates).filter(k => memoryExtraction.updates[k] === "__DELETE__"),
+                  totalKeys: Object.keys(newMemory).length
+                };
+                userMemory = newMemory; // Update local copy
+                updateMetrics('memoryUpdates');
+              } else {
+                console.error('❌ Failed to save memory to Redis');
+              }
+            } else {
+              console.log('ℹ️ No changes detected after merge');
             }
           }
         } finally {
@@ -1319,7 +1365,6 @@ export default async function handler(req, res) {
         }
       }
     }
-    
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
     
     // 🔧 OPTIMIZATION: Batch save để giảm latency
@@ -1407,4 +1452,4 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     });
   }
-}
+  }
