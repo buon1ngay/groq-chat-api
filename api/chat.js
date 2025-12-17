@@ -1,11 +1,23 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 
-// Khởi tạo Redis
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_URL,
-  token: process.env.UPSTASH_REDIS_TOKEN,
-});
+// Kiểm tra và khởi tạo Redis
+let redis = null;
+const REDIS_ENABLED = process.env.UPSTASH_REDIS_URL && process.env.UPSTASH_REDIS_TOKEN;
+
+if (REDIS_ENABLED) {
+  try {
+    redis = new Redis({
+      url: process.env.UPSTASH_REDIS_URL,
+      token: process.env.UPSTASH_REDIS_TOKEN,
+    });
+  } catch (error) {
+    console.error('❌ Redis initialization error:', error);
+  }
+}
+
+// Fallback: In-memory storage
+const memoryStore = new Map();
 
 // Danh sách 10 API keys
 const API_KEYS = [
@@ -29,31 +41,86 @@ const MEMORY_CONFIG = {
   SUMMARY_THRESHOLD: 40         // Khi > 40 tin nhắn thì tóm tắt
 };
 
+// ============ STORAGE HELPERS ============
+
+async function setData(key, value, ttl = null) {
+  if (redis) {
+    return ttl ? await redis.set(key, value, { ex: ttl }) : await redis.set(key, value);
+  } else {
+    memoryStore.set(key, { value, expires: ttl ? Date.now() + ttl * 1000 : null });
+    return true;
+  }
+}
+
+async function getData(key) {
+  if (redis) {
+    return await redis.get(key);
+  } else {
+    const item = memoryStore.get(key);
+    if (!item) return null;
+    if (item.expires && Date.now() > item.expires) {
+      memoryStore.delete(key);
+      return null;
+    }
+    return item.value;
+  }
+}
+
+async function setHashData(key, data, ttl = null) {
+  if (redis) {
+    await redis.hset(key, data);
+    if (ttl) await redis.expire(key, ttl);
+    return true;
+  } else {
+    memoryStore.set(key, { value: data, expires: ttl ? Date.now() + ttl * 1000 : null });
+    return true;
+  }
+}
+
+async function getHashData(key) {
+  if (redis) {
+    return await redis.hgetall(key);
+  } else {
+    const item = memoryStore.get(key);
+    if (!item) return {};
+    if (item.expires && Date.now() > item.expires) {
+      memoryStore.delete(key);
+      return {};
+    }
+    return item.value || {};
+  }
+}
+
+async function setExpire(key, ttl) {
+  if (redis) {
+    return await redis.expire(key, ttl);
+  }
+  return true;
+}
+
 // ============ MEMORY FUNCTIONS ============
 
 // 1. Lấy lịch sử chat ngắn hạn (auto-expire 7 ngày)
 async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
-  const history = await redis.get(key);
+  const history = await getData(key);
   return history || [];
 }
 
 // 2. Lưu lịch sử chat ngắn hạn
 async function saveShortTermMemory(userId, conversationId, history) {
   const key = `chat:${userId}:${conversationId}`;
-  await redis.set(key, history, {
-    ex: MEMORY_CONFIG.SHORT_TERM_DAYS * 86400 // 7 ngày
-  });
+  await setData(key, history, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
 }
 
 // 3. Lấy memory "cứng" vĩnh viễn (tên, tuổi, sở thích...)
 async function getLongTermMemory(userId) {
   const key = `user:profile:${userId}`;
-  const profile = await redis.hgetall(key);
+  const profile = await getHashData(key);
   
   // Reset TTL mỗi lần truy cập (1 năm không chat mới xóa)
   if (profile && Object.keys(profile).length > 0) {
-    await redis.expire(key, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
+    await setExpire(key, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
   }
   
   return profile || {};
@@ -62,17 +129,16 @@ async function getLongTermMemory(userId) {
 // 4. Lưu memory "cứng" vĩnh viễn
 async function saveLongTermMemory(userId, profileData) {
   const key = `user:profile:${userId}`;
-  await redis.hset(key, profileData);
-  await redis.expire(key, MEMORY_CONFIG.LONG_TERM_DAYS * 86400); // 1 năm
+  await setHashData(key, profileData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
 }
 
 // 5. Lấy tóm tắt các tin nhắn cũ
 async function getSummary(userId, conversationId) {
   const key = `summary:${userId}:${conversationId}`;
-  const summary = await redis.get(key);
+  const summary = await getData(key);
   
   if (summary) {
-    await redis.expire(key, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
+    await setExpire(key, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
   }
   
   return summary || '';
@@ -81,9 +147,7 @@ async function getSummary(userId, conversationId) {
 // 6. Lưu tóm tắt
 async function saveSummary(userId, conversationId, summary) {
   const key = `summary:${userId}:${conversationId}`;
-  await redis.set(key, summary, {
-    ex: MEMORY_CONFIG.SHORT_TERM_DAYS * 86400
-  });
+  await setData(key, summary, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
 }
 
 // 7. Tóm tắt tin nhắn cũ bằng AI
@@ -160,11 +224,11 @@ function getNextKeyIndex(currentIndex) {
 
 async function getUserKeyIndex(userId) {
   const key = `keyindex:${userId}`;
-  let index = await redis.get(key);
+  let index = await getData(key);
   
   if (index === null) {
     index = getRandomKeyIndex();
-    await redis.set(key, index, { ex: 86400 }); // Cache 24h
+    await setData(key, index, 86400); // Cache 24h
   }
   
   return parseInt(index);
@@ -172,7 +236,7 @@ async function getUserKeyIndex(userId) {
 
 async function setUserKeyIndex(userId, index) {
   const key = `keyindex:${userId}`;
-  await redis.set(key, index, { ex: 86400 });
+  await setData(key, index, 86400);
 }
 
 async function callGroqWithRetry(userId, messages) {
@@ -225,31 +289,61 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { message, userId = 'default', conversationId = 'default' } = req.body;
+    // ===== NHẬN DỮ LIỆU TỪ ANDROID APP =====
+    const { message, userId, conversationId } = req.body;
 
-    if (!message || typeof message !== 'string') {
-      return res.status(400).json({ error: 'Message is required' });
+    // Validation
+    if (!message || typeof message !== 'string' || message.trim() === '') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Message is required and cannot be empty' 
+      });
     }
+
+    // Validate userId format từ Android (user_<timestamp>)
+    if (!userId || !userId.startsWith('user_')) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Invalid userId format. Expected format: user_<timestamp>' 
+      });
+    }
+
+    // conversationId mặc định nếu không có
+    const finalConversationId = conversationId || 'default';
 
     if (API_KEYS.length === 0) {
-      return res.status(500).json({ error: 'No API keys configured' });
+      return res.status(500).json({ 
+        success: false,
+        error: 'No API keys configured' 
+      });
     }
 
-    // 1. Lấy memory từ Redis
-    let conversationHistory = await getShortTermMemory(userId, conversationId);
+    // Cảnh báo nếu Redis không khả dụng
+    if (!REDIS_ENABLED) {
+      console.warn('⚠️ Redis not configured - using in-memory storage');
+    }
+
+    console.log(`📱 Request from Android - userId: ${userId}, conversationId: ${finalConversationId}`);
+
+    // 1. Lấy memory từ Redis/In-Memory
+    let conversationHistory = await getShortTermMemory(userId, finalConversationId);
     const userProfile = await getLongTermMemory(userId);
-    let existingSummary = await getSummary(userId, conversationId);
+    let existingSummary = await getSummary(userId, finalConversationId);
+
+    console.log(`💾 Loaded ${conversationHistory.length} messages, profile fields: ${Object.keys(userProfile).length}`);
 
     // 2. Thêm tin nhắn mới
     conversationHistory.push({
       role: 'user',
-      content: message
+      content: message.trim()
     });
 
     // 3. Xử lý khi vượt quá ngưỡng (> 40 tin nhắn)
     let workingMemory = conversationHistory;
     
     if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
+      console.log(`📊 History > ${MEMORY_CONFIG.SUMMARY_THRESHOLD}, creating summary...`);
+      
       // Tách: tin nhắn cũ vs tin nhắn gần đây
       const oldMessages = conversationHistory.slice(0, -MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       workingMemory = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
@@ -258,7 +352,8 @@ export default async function handler(req, res) {
       if (!existingSummary) {
         const tempGroq = new Groq({ apiKey: API_KEYS[0] });
         existingSummary = await summarizeOldMessages(tempGroq, oldMessages);
-        await saveSummary(userId, conversationId, existingSummary);
+        await saveSummary(userId, finalConversationId, existingSummary);
+        console.log(`✅ Summary created: ${existingSummary.substring(0, 50)}...`);
       }
     }
 
@@ -277,9 +372,12 @@ ${existingSummary ? `TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummar
 
     const messages = [systemPrompt, ...workingMemory];
 
-    // 5. Gọi AI
+    // 5. Gọi AI với retry logic
+    console.log(`🤖 Calling AI with ${workingMemory.length} messages...`);
     const { groq, chatCompletion } = await callGroqWithRetry(userId, messages);
     const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
+
+    console.log(`✅ AI responded: ${assistantMessage.substring(0, 50)}...`);
 
     // 6. Lưu phản hồi vào history
     conversationHistory.push({
@@ -287,36 +385,42 @@ ${existingSummary ? `TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummar
       content: assistantMessage
     });
 
-    // 7. Lưu vào Redis
-    await saveShortTermMemory(userId, conversationId, conversationHistory);
+    // 7. Lưu vào Redis/In-Memory
+    await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // 8. Trích xuất và cập nhật thông tin cá nhân (mỗi 5 tin nhắn)
+    // 8. Trích xuất và cập nhật thông tin cá nhân (mỗi 10 tin nhắn)
     if (conversationHistory.length % 10 === 0) {
+      console.log(`🔍 Extracting personal info at message ${conversationHistory.length}...`);
       const newInfo = await extractPersonalInfo(groq, conversationHistory);
+      
       if (Object.keys(newInfo).length > 0) {
         const updatedProfile = { ...userProfile, ...newInfo };
         await saveLongTermMemory(userId, updatedProfile);
+        console.log(`✅ Updated profile:`, newInfo);
       }
     }
 
-    // 9. Trả về response
+    // 9. Trả về response cho Android App
     return res.status(200).json({
       success: true,
       message: assistantMessage,
-      conversationId,
+      userId: userId,
+      conversationId: finalConversationId,
       stats: {
         totalMessages: conversationHistory.length,
         workingMemorySize: workingMemory.length,
         hasSummary: !!existingSummary,
-        userProfileFields: Object.keys(userProfile).length
+        userProfileFields: Object.keys(userProfile).length,
+        storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory'
       }
     });
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('❌ Error:', error);
     return res.status(500).json({
       success: false,
-      error: error.message || 'Internal server error'
+      error: error.message || 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
-}
+      }
