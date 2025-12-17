@@ -679,4 +679,3 @@ ${searchResult ? `\n${searchResult}\n⚠️ Hãy ưu tiên sử dụng thông ti
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
-  }
