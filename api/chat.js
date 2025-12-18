@@ -1,9 +1,6 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 import axios from 'axios';
-
-// ============ REDIS & API KEYS ============
-
 let redis = null;
 const REDIS_ENABLED = process.env.UPSTASH_REDIS_URL && process.env.UPSTASH_REDIS_TOKEN;
 
@@ -17,7 +14,6 @@ if (REDIS_ENABLED) {
     console.error('❌ Redis initialization error:', error);
   }
 }
-
 const memoryStore = new Map();
 const searchCache = new Map(); // Cache search results
 
@@ -250,11 +246,19 @@ async function shouldSearch(message, groq) {
   const lowerQuery = message.toLowerCase();
   
   const definiteSearchKeywords = [
-    'tìm kiếm', 'search', 'tra cứu', 'google',
-    'giá bitcoin', 'giá vàng', 'thời tiết',
-    'tin tức', 'mới nhất', 'hiện tại', 'hôm nay'
-  ];
-  
+    // Tìm kiếm cơ bản
+  'tìm kiếm', 'search', 'tra cứu', 'google', 'bing',
+  // Tìm lại (khi user nghi ngờ)
+  'tìm đi', 'tìm lại', 'tìm lại đi', 'xem lại', 
+  'tìm giúp', 'tra giúp', 'kiểm tra lại', 'search lại',
+  'tra lại', 'xác minh', 'chắc chắn không', 'có đúng không',
+  // Real-time data
+  'giá bitcoin', 'giá vàng', 'giá dầu', 'tỷ giá',
+  'thời tiết', 'nhiệt độ',
+  'tin tức', 'mới nhất', 'hiện tại', 'hôm nay', 'bây giờ',
+  // Câu hỏi trực tiếp
+  'bao nhiêu', 'mấy giờ', 'khi nào'
+];  
   if (definiteSearchKeywords.some(kw => lowerQuery.includes(kw))) {
     return { needsSearch: true, confidence: 1.0, type: 'realtime' };
   }
@@ -757,7 +761,7 @@ export default async function handler(req, res) {
 
     const systemPrompt = {
       role: 'system',
-      content: `Bạn là trợ lý AI thông minh và hữu ích. Hãy trả lời bằng tiếng Việt.
+      content: `Bạn là Kami, AI thông minh và thân thiện. Hãy trả lời bằng tiếng Việt, có thể thêm emoji tùy ngữ cảnh để trò chuyện thêm sinh động
 
 📅 Ngày hiện tại: ${currentDate}
 
