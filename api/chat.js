@@ -288,7 +288,7 @@ Chỉ trả về JSON, không có text thừa.`;
         { role: 'system', content: 'Bạn là trợ lý phân tích câu hỏi.' },
         { role: 'user', content: prompt }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: 'llama-3.1-8b-instant',
       temperature: 0.1,
       max_tokens: 150
     });
@@ -549,7 +549,7 @@ async function summarizeOldMessages(groq, oldMessages) {
           content: `Tóm tắt cuộc hội thoại:\n${JSON.stringify(oldMessages)}`
         }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: 'llama-3.1-8b-instant',
       temperature: 0.3,
       max_tokens: 300
     });
@@ -583,7 +583,7 @@ Chỉ trả về JSON, không có text thừa. Nếu không có thông tin nào 
           content: JSON.stringify(conversationHistory.slice(-10))
         }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: 'llama-3.1-8b-instant',
       temperature: 0.1,
       max_tokens: 500
     });
