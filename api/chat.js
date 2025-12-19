@@ -878,6 +878,19 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠️ Hãy ưu tiên s
     // 9. Response
     const lastExtractData = await getData(`last_extract:${userId}:${finalConversationId}`);
     
+    // Safe parse lastExtractData
+    let parsedExtractData = null;
+    if (lastExtractData) {
+      try {
+        parsedExtractData = typeof lastExtractData === 'string' 
+          ? JSON.parse(lastExtractData) 
+          : lastExtractData;
+      } catch (error) {
+        console.error('Failed to parse lastExtractData:', error);
+        parsedExtractData = null;
+      }
+    }
+    
     return res.status(200).json({
       success: true,
       message: assistantMessage,
@@ -892,7 +905,7 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠️ Hãy ưu tiên s
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
         cacheSize: searchCache.size,
-        lastExtract: lastExtractData ? JSON.parse(lastExtractData) : null
+        lastExtract: parsedExtractData
       }
     });
 
