@@ -42,8 +42,7 @@ const MEMORY_CONFIG = {
   EXTRACT_INTERVAL: 10,             // Extract mỗi 10 tin
   SEARCH_CACHE_MINUTES: 10          // Cache search 10 phút
 };
-
-// ============ STORAGE HELPERS ============
+// ============ STORAGE HELPERS (FIXED) ============
 
 async function setData(key, value, ttl = null) {
   if (redis) {
@@ -70,7 +69,12 @@ async function getData(key) {
 
 async function setHashData(key, data, ttl = null) {
   if (redis) {
-    await redis.hset(key, data);
+    // ✅ FIX: Convert all values to strings for Redis
+    const stringData = {};
+    for (const [k, v] of Object.entries(data)) {
+      stringData[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    }
+    await redis.hset(key, stringData);
     if (ttl) await redis.expire(key, ttl);
     return true;
   } else {
@@ -81,7 +85,19 @@ async function setHashData(key, data, ttl = null) {
 
 async function getHashData(key) {
   if (redis) {
-    return await redis.hgetall(key);
+    const data = await redis.hgetall(key);
+    // ✅ FIX: Parse JSON strings back to objects if needed
+    const parsed = {};
+    for (const [k, v] of Object.entries(data)) {
+      try {
+        // Try parsing as JSON first
+        parsed[k] = JSON.parse(v);
+      } catch {
+        // If not JSON, keep as string
+        parsed[k] = v;
+      }
+    }
+    return parsed;
   } else {
     const item = memoryStore.get(key);
     if (!item) return {};
@@ -93,11 +109,91 @@ async function getHashData(key) {
   }
 }
 
-async function setExpire(key, ttl) {
-  if (redis) {
-    return await redis.expire(key, ttl);
+// ============ MEMORY FUNCTIONS (FIXED) ============
+
+async function extractPersonalInfo(groq, conversationHistory) {
+  try {
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        {
+          role: 'system',
+          content: `Trích xuất thông tin cá nhân từ cuộc hội thoại (nếu có) theo format JSON:
+{
+  "name": "tên người dùng",
+  "age": "tuổi",
+  "job": "nghề nghiệp",
+  "hobbies": "sở thích",
+  "location": "nơi ở",
+  "other": "thông tin khác"
+}
+
+⚠️ QUAN TRỌNG: 
+- Tất cả giá trị PHẢI là string đơn giản
+- KHÔNG được trả về nested objects hay arrays
+- Chỉ trả về JSON thuần túy, không có text thừa
+- Nếu không có thông tin nào thì trả về {}
+
+Ví dụ ĐÚNG: {"name": "An", "age": "25", "hobbies": "đọc sách, chơi game"}
+Ví dụ SAI: {"name": "An", "hobbies": ["đọc sách", "game"]} ❌`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify(conversationHistory.slice(-10))
+        }
+      ],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.1,
+      max_tokens: 500
+    });
+    
+    const result = chatCompletion.choices[0]?.message?.content || '{}';
+    const parsed = JSON.parse(result.replace(/```json|```/g, '').trim());
+    
+    // ✅ FIX: Ensure all values are strings
+    const sanitized = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'string') {
+        sanitized[key] = value;
+      } else if (Array.isArray(value)) {
+        sanitized[key] = value.join(', '); // Convert array to string
+      } else if (typeof value === 'object' && value !== null) {
+        sanitized[key] = JSON.stringify(value); // Convert object to string
+      } else {
+        sanitized[key] = String(value); // Convert everything else to string
+      }
+    }
+    
+    return sanitized;
+  } catch (error) {
+    console.error('Error extracting info:', error);
+    return {};
   }
-  return true;
+}
+
+async function saveLongTermMemory(userId, profileData) {
+  const key = `user:profile:${userId}`;
+  
+  // ✅ FIX: Double-check all values are strings before saving
+  const sanitizedData = {};
+  for (const [k, v] of Object.entries(profileData)) {
+    sanitizedData[k] = typeof v === 'string' ? v : JSON.stringify(v);
+  }
+  
+  await setHashData(key, sanitizedData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
+}
+
+// ============ DEBUGGING HELPER ============
+
+function validateJSON(data, context) {
+  try {
+    const str = JSON.stringify(data);
+    JSON.parse(str);
+    return true;
+  } catch (error) {
+    console.error(`❌ Invalid JSON in ${context}:`, error.message);
+    console.error('Data:', data);
+    return false;
+  }
 }
 
 // ============ SEARCH APIs với Retry & Timeout ============
