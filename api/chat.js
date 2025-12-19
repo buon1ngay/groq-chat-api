@@ -596,6 +596,58 @@ Chỉ trả về JSON, không có text thừa. Nếu không có thông tin nào 
   }
 }
 
+// ============ FIXED EXTRACT LOGIC ============
+
+/**
+ * Kiểm tra xem có nên extract thông tin bây giờ không
+ * @param {string} userId 
+ * @param {string} conversationId 
+ * @param {Array} conversationHistory 
+ * @returns {Promise<boolean>}
+ */
+async function shouldExtractNow(userId, conversationId, conversationHistory) {
+  const key = `last_extract:${userId}:${conversationId}`;
+  const lastExtract = await getData(key);
+  
+  // Lần đầu tiên: extract khi có đủ 5 tin để phân tích
+  if (!lastExtract) {
+    return conversationHistory.length >= 5;
+  }
+  
+  try {
+    const lastExtractData = JSON.parse(lastExtract);
+    const timeSince = Date.now() - lastExtractData.timestamp;
+    const messagesSince = conversationHistory.length - lastExtractData.messageCount;
+    
+    // Logic extract thông minh:
+    // 1. Đã qua 5 phút VÀ có ít nhất 3 tin mới (user chat bình thường)
+    // 2. HOẶC có 10 tin mới (user chat liên tục)
+    const shouldExtractByTime = timeSince > 300000 && messagesSince >= 3;
+    const shouldExtractByCount = messagesSince >= 10;
+    
+    return shouldExtractByTime || shouldExtractByCount;
+  } catch (error) {
+    console.error('Error parsing last extract data:', error);
+    // Fallback: extract nếu có >= 5 tin
+    return conversationHistory.length >= 5;
+  }
+}
+
+/**
+ * Đánh dấu đã extract xong
+ * @param {string} userId 
+ * @param {string} conversationId 
+ * @param {Array} conversationHistory 
+ */
+async function markExtracted(userId, conversationId, conversationHistory) {
+  const key = `last_extract:${userId}:${conversationId}`;
+  await setData(key, JSON.stringify({
+    timestamp: Date.now(),
+    messageCount: conversationHistory.length,
+    extractedAt: new Date().toISOString()
+  }), MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
+}
+
 // ============ API KEY MANAGEMENT ============
 
 function getRandomKeyIndex() {
@@ -761,7 +813,7 @@ export default async function handler(req, res) {
 
     const systemPrompt = {
       role: 'system',
-      content: `Bạn là Kami được tao ra bởi Nguyễn Đức Thạnh, là một AI thông minh và thân thiện. Hãy trả lời bằng tiếng Việt, có thể thêm emoji tùy ngữ cảnh để trò chuyện thêm sinh động.
+      content: `Bạn là Kami, một AI thông minh và thân thiện được tao ra bởi Nguyễn Đức Thạnh. Hãy trả lời bằng tiếng Việt tự nhiên và không lặp lại cùng một nội dung nhiều lần. Có thể thêm emoji tùy ngữ cảnh để trò chuyện thêm sinh động.
 📅 Ngày hiện tại: ${currentDate}
 ${Object.keys(userProfile).length > 0 ? `
 👤 THÔNG TIN NGƯỜI DÙNG (nhớ lâu dài):
@@ -790,17 +842,20 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠️ Hãy ưu tiên s
     // FIXED: Lưu FULL conversationHistory (không phải workingMemory)
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // 8. Extract personal info (định kỳ + safety check)
-    const shouldExtract = conversationHistory.length % MEMORY_CONFIG.EXTRACT_INTERVAL === 0;
-    
-    if (shouldExtract) {
-      console.log(`🔍 Extracting personal info...`);
+    // 8. FIXED Extract personal info với logic mới
+    if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
+      console.log(`🔍 Extracting personal info (${conversationHistory.length} messages)...`);
       const newInfo = await extractPersonalInfo(groq, conversationHistory);
       
       if (Object.keys(newInfo).length > 0) {
         const updatedProfile = { ...userProfile, ...newInfo };
         await saveLongTermMemory(userId, updatedProfile);
+        await markExtracted(userId, finalConversationId, conversationHistory);
         console.log(`✅ Profile updated:`, Object.keys(newInfo));
+      } else {
+        // Không có info mới nhưng vẫn mark để tránh spam extract
+        await markExtracted(userId, finalConversationId, conversationHistory);
+        console.log(`ℹ️ No new personal info found`);
       }
     }
 
@@ -821,6 +876,8 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠️ Hãy ưu tiên s
     }
 
     // 9. Response
+    const lastExtractData = await getData(`last_extract:${userId}:${finalConversationId}`);
+    
     return res.status(200).json({
       success: true,
       message: assistantMessage,
@@ -834,7 +891,8 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠️ Hãy ưu tiên s
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
-        cacheSize: searchCache.size
+        cacheSize: searchCache.size,
+        lastExtract: lastExtractData ? JSON.parse(lastExtractData) : null
       }
     });
 
