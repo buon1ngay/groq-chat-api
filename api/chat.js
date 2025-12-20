@@ -69,14 +69,8 @@ async function getData(key) {
 
 async function setHashData(key, data, ttl = null) {
   if (redis) {
-    // 🔧 FIX: Upstash hset requires flat key-value pairs
-    // Convert {name: "Thạnh", age: "25"} → ["name", "Thạnh", "age", "25"]
-    const flatData = Object.entries(data).flat();
-    
-    if (flatData.length > 0) {
-      await redis.hset(key, ...flatData);
-      if (ttl) await redis.expire(key, ttl);
-    }
+    await redis.hset(key, data);
+    if (ttl) await redis.expire(key, ttl);
     return true;
   } else {
     memoryStore.set(key, { value: data, expires: ttl ? Date.now() + ttl * 1000 : null });
