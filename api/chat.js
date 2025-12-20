@@ -573,39 +573,52 @@ function smartMergeProfile(oldProfile, newInfo) {
   return { merged, changes };
 }
 
-async function extractPersonalInfo(groq, conversationHistory) {
+async function extractPersonalInfo(groq, conversationHistory, currentProfile = {}) {
   try {
     const chatCompletion = await groq.chat.completions.create({
       messages: [
         {
           role: 'system',
-          content: `Trích xuất thông tin cá nhân từ cuộc hội thoại (nếu có) theo format JSON:
+          content: `Bạn là trợ lý quản lý thông tin cá nhân. Phân tích cuộc hội thoại và cập nhật profile.
+
+PROFILE HIỆN TẠI:
+${Object.keys(currentProfile).length > 0 ? JSON.stringify(currentProfile, null, 2) : 'Chưa có thông tin'}
+
+NHIỆM VỤ:
+1. Tìm thông tin cá nhân MỚI từ hội thoại
+2. Phát hiện yêu cầu SỬA/CẬP NHẬT thông tin cũ (VD: "sửa tên thành...", "tên là... chứ không phải...")
+3. Trả về JSON với các field:
+
 {
-  "name": "tên người dùng",
+  "name": "tên đầy đủ (nếu có update)",
   "age": "tuổi",
-  "job": "nghề nghiệp",
+  "job": "nghề nghiệp", 
   "hobbies": "sở thích",
-  "location": "nơi ở",
-  "other": "thông tin khác"
+  "location": "địa điểm",
+  "nickname": "biệt danh/tên thân mật",
+  "other": "thông tin bổ sung khác"
 }
 
-QUAN TRỌNG: 
-- Chỉ điền thông tin NẾU có trong hội thoại
-- Nếu KHÔNG TÌM THẤY thông tin nào, BỎ QUA key đó (không trả về key rỗng)
-- Chỉ trả về JSON, không có text thừa`
+QUY TẮC:
+- Nếu user nói "sửa X thành Y" → trả về field với giá trị Y
+- Nếu user nói "tên là A chứ không phải B" → trả về {"name": "A"}
+- Nếu user nói "gọi tôi là X" → trả về {"nickname": "X"}
+- CHỈ trả về các field CÓ THÔNG TIN, bỏ qua field rỗng
+- Chỉ trả về JSON thuần, không markdown, không giải thích`
         },
         {
           role: 'user',
-          content: JSON.stringify(conversationHistory.slice(-10))
+          content: `Hội thoại gần đây:\n${JSON.stringify(conversationHistory.slice(-10), null, 2)}`
         }
       ],
       model: 'llama-3.1-8b-instant',
       temperature: 0.1,
-      max_tokens: 500
+      max_tokens: 600
     });
     
     const result = chatCompletion.choices[0]?.message?.content || '{}';
-    return JSON.parse(result.replace(/```json|```/g, '').trim());
+    const cleaned = result.replace(/```json|```/g, '').trim();
+    return JSON.parse(cleaned);
   } catch (error) {
     console.error('Error extracting info:', error);
     return {};
@@ -814,7 +827,14 @@ export default async function handler(req, res) {
 📅 Ngày hiện tại: ${currentDate}
 ${Object.keys(userProfile).length > 0 ? `
 👤 THÔNG TIN NGƯỜI DÙNG (nhớ lâu dài):
-${Object.entries(userProfile).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
+${userProfile.nickname ? `- Gọi là: ${userProfile.nickname} (nickname)` : ''}
+${userProfile.name ? `- Tên thật: ${userProfile.name}` : ''}
+${Object.entries(userProfile)
+  .filter(([k]) => k !== 'name' && k !== 'nickname')
+  .map(([k, v]) => `- ${k}: ${v}`)
+  .join('\n')}
+
+⚠️ Ưu tiên gọi người dùng bằng nickname nếu có!
 ` : ''}
 ${existingSummary ? `📝 TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummary}\n` : ''}
 
@@ -841,7 +861,8 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
     // 8. 🔧 FIXED: Smart extract with proper merge
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Extracting personal info (${conversationHistory.length} messages)...`);
-      const newInfo = await extractPersonalInfo(groq, conversationHistory);
+      // 🔧 PASS CURRENT PROFILE to help AI understand corrections
+      const newInfo = await extractPersonalInfo(groq, conversationHistory, userProfile);
       
       if (Object.keys(newInfo).length > 0) {
         // 🔧 USE SMART MERGE instead of spread operator
@@ -870,7 +891,7 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
       
       if (daysRemaining > 0 && daysRemaining < 2 && conversationHistory.length >= 3) {
         console.log(`⚠ Safety extract - TTL < 2 days`);
-        const newInfo = await extractPersonalInfo(groq, conversationHistory);
+        const newInfo = await extractPersonalInfo(groq, conversationHistory, userProfile);
         if (Object.keys(newInfo).length > 0) {
           const { merged } = smartMergeProfile(userProfile, newInfo);
           await saveLongTermMemory(userId, merged);
