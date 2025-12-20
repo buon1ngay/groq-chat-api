@@ -15,7 +15,7 @@ if (REDIS_ENABLED) {
   }
 }
 const memoryStore = new Map();
-const searchCache = new Map();
+const searchCache = new Map(); // Cache search results
 
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
@@ -30,16 +30,17 @@ const API_KEYS = [
   process.env.GROQ_API_KEY_10
 ].filter(key => key);
 
+// Search API keys
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 const MEMORY_CONFIG = {
-  SHORT_TERM_DAYS: 14,
+  SHORT_TERM_DAYS: 14,              // Tăng lên 14 ngày (fix bug mất data)
   WORKING_MEMORY_LIMIT: 30,
   LONG_TERM_DAYS: 365,
   SUMMARY_THRESHOLD: 40,
-  EXTRACT_INTERVAL: 10,
-  SEARCH_CACHE_MINUTES: 10
+  EXTRACT_INTERVAL: 10,             // Extract mỗi 10 tin
+  SEARCH_CACHE_MINUTES: 10          // Cache search 10 phút
 };
 
 // ============ STORAGE HELPERS ============
@@ -99,8 +100,9 @@ async function setExpire(key, ttl) {
   return true;
 }
 
-// ============ SEARCH APIs ============
+// ============ SEARCH APIs với Retry & Timeout ============
 
+// Helper: Retry với exponential backoff
 async function retryWithBackoff(fn, maxRetries = 2) {
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -112,9 +114,11 @@ async function retryWithBackoff(fn, maxRetries = 2) {
   }
 }
 
+// 1. Wikipedia API (FREE ∞)
 async function searchWikipedia(query) {
   try {
     return await retryWithBackoff(async () => {
+      // Bước 1: Search để tìm tên bài viết
       const searchUrl = 'https://vi.wikipedia.org/w/api.php';
       const searchResponse = await axios.get(searchUrl, {
         params: {
@@ -132,6 +136,8 @@ async function searchWikipedia(query) {
       }
 
       const pageTitle = titles[0];
+
+      // Bước 2: Lấy summary
       const summaryUrl = `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pageTitle)}`;
       const summaryResponse = await axios.get(summaryUrl, {
         timeout: 4000
@@ -154,6 +160,7 @@ async function searchWikipedia(query) {
   }
 }
 
+// 2. Serper.dev API
 async function searchSerper(query) {
   if (!SERPER_API_KEY) {
     console.warn('⚠ Serper API key not configured');
@@ -194,6 +201,7 @@ async function searchSerper(query) {
   }
 }
 
+// 3. Tavily AI
 async function searchTavily(query) {
   if (!TAVILY_API_KEY) {
     console.warn('⚠ Tavily API key not configured');
@@ -231,30 +239,36 @@ async function searchTavily(query) {
   }
 }
 
-// ============ SEARCH DETECTION ============
+// ============ AI-POWERED SEARCH DETECTION ============
 
 async function shouldSearch(message, groq) {
+  // Quick keyword check first (fast path)
   const lowerQuery = message.toLowerCase();
   
   const definiteSearchKeywords = [
-    'tìm kiếm', 'search', 'tra cứu', 'google', 'bing',
-    'tìm đi', 'tìm lại', 'tìm lại đi', 'xem lại', 
-    'tìm giúp', 'tra giúp', 'kiểm tra lại', 'search lại',
-    'tra lại', 'xác minh', 'chắc chắn không', 'có đúng không',
-    'giá bitcoin', 'giá vàng', 'giá dầu', 'tỷ giá',
-    'thời tiết', 'nhiệt độ',
-    'tin tức', 'mới nhất', 'hiện tại', 'hôm nay', 'bây giờ',
-    'bao nhiêu', 'mấy giờ', 'khi nào'
-  ];
-  
+    // Tìm kiếm cơ bản
+  'tìm kiếm', 'search', 'tra cứu', 'google', 'bing',
+  // Tìm lại (khi user nghi ngờ)
+  'tìm đi', 'tìm lại', 'tìm lại đi', 'xem lại', 
+  'tìm giúp', 'tra giúp', 'kiểm tra lại', 'search lại',
+  'tra lại', 'xác minh', 'chắc chắn không', 'có đúng không',
+  // Real-time data
+  'giá bitcoin', 'giá vàng', 'giá dầu', 'tỷ giá',
+  'thời tiết', 'nhiệt độ',
+  'tin tức', 'mới nhất', 'hiện tại', 'hôm nay', 'bây giờ',
+  // Câu hỏi trực tiếp
+  'bao nhiêu', 'mấy giờ', 'khi nào'
+];  
   if (definiteSearchKeywords.some(kw => lowerQuery.includes(kw))) {
     return { needsSearch: true, confidence: 1.0, type: 'realtime' };
   }
 
+  // Nếu câu hỏi ngắn và không rõ ràng, skip AI detection
   if (message.length < 10) {
     return { needsSearch: false, confidence: 0 };
   }
 
+  // AI-powered detection cho các case phức tạp
   try {
     const prompt = `Phân tích câu hỏi sau và xác định có cần tìm kiếm thông tin không:
 
@@ -289,10 +303,12 @@ Chỉ trả về JSON, không có text thừa.`;
     };
   } catch (error) {
     console.error('AI search detection error:', error);
+    // Fallback to keyword-based detection
     return analyzeQueryKeywords(message);
   }
 }
 
+// Fallback keyword analysis
 function analyzeQueryKeywords(query) {
   const lowerQuery = query.toLowerCase();
   
@@ -311,7 +327,7 @@ function analyzeQueryKeywords(query) {
   return { needsSearch: false, confidence: 0.3 };
 }
 
-// ============ SMART SEARCH ============
+// ============ SMART SEARCH với Cache ============
 
 function getCacheKey(query) {
   return `search:${query.toLowerCase().trim()}`;
@@ -342,6 +358,7 @@ function saveToCache(query, result) {
     timestamp: Date.now()
   });
   
+  // Giới hạn cache size (max 100 entries)
   if (searchCache.size > 100) {
     const firstKey = searchCache.keys().next().value;
     searchCache.delete(firstKey);
@@ -349,6 +366,7 @@ function saveToCache(query, result) {
 }
 
 async function smartSearch(query, searchType, groq) {
+  // Check cache first
   const cached = getFromCache(query);
   if (cached) return cached;
 
@@ -357,7 +375,9 @@ async function smartSearch(query, searchType, groq) {
   let result = null;
 
   try {
+    // Strategy based on type
     if (searchType === 'knowledge') {
+      // Wikipedia first (free + best for knowledge)
       result = await searchWikipedia(query);
       if (result) {
         saveToCache(query, result);
@@ -366,6 +386,7 @@ async function smartSearch(query, searchType, groq) {
     }
 
     if (searchType === 'realtime') {
+      // Serper first (best for real-time)
       if (SERPER_API_KEY) {
         result = await searchSerper(query);
         if (result) {
@@ -376,6 +397,7 @@ async function smartSearch(query, searchType, groq) {
     }
 
     if (searchType === 'research') {
+      // Tavily first (best for research)
       if (TAVILY_API_KEY) {
         result = await searchTavily(query);
         if (result) {
@@ -385,6 +407,7 @@ async function smartSearch(query, searchType, groq) {
       }
     }
 
+    // Fallback: Try all in order (Wikipedia → Serper → Tavily)
     console.log(`🔄 Fallback search mode...`);
     
     result = await searchWikipedia(query);
@@ -450,12 +473,13 @@ function formatSearchResult(searchData) {
   return formatted;
 }
 
-// ============ MEMORY FUNCTIONS ============
+// ============ MEMORY FUNCTIONS (FIXED) ============
 
 async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
   const history = await getData(key);
   
+  // Safe parsing
   if (!history) return [];
   
   if (typeof history === 'string') {
@@ -537,92 +561,55 @@ async function summarizeOldMessages(groq, oldMessages) {
   }
 }
 
-// ============ 🔧 SMART PROFILE MERGE ============
-
-function smartMergeProfile(oldProfile, newInfo) {
-  const merged = { ...oldProfile };
-  const changes = [];
-  
-  for (const [key, value] of Object.entries(newInfo)) {
-    const isValidValue = value && 
-                        typeof value === 'string' && 
-                        value.trim() !== '' && 
-                        value !== 'null' && 
-                        value !== 'undefined';
-    
-    if (isValidValue) {
-      const oldValue = merged[key];
-      merged[key] = value;
-      
-      if (oldValue && oldValue !== value) {
-        changes.push(`${key}: "${oldValue}" → "${value}"`);
-      } else if (!oldValue) {
-        changes.push(`${key}: NEW → "${value}"`);
-      }
-    }
-  }
-  
-  return { merged, changes };
-}
-
-async function extractPersonalInfo(groq, conversationHistory, currentProfile = {}) {
+async function extractPersonalInfo(groq, conversationHistory) {
   try {
     const chatCompletion = await groq.chat.completions.create({
       messages: [
         {
           role: 'system',
-          content: `Bạn là trợ lý quản lý thông tin cá nhân. Phân tích cuộc hội thoại và cập nhật profile.
-
-PROFILE HIỆN TẠI:
-${Object.keys(currentProfile).length > 0 ? JSON.stringify(currentProfile, null, 2) : 'Chưa có thông tin'}
-
-NHIỆM VỤ:
-1. Tìm thông tin cá nhân MỚI từ hội thoại
-2. Phát hiện yêu cầu SỬA/CẬP NHẬT thông tin cũ (VD: "sửa tên thành...", "tên là... chứ không phải...")
-3. Trả về JSON với các field:
-
+          content: `Trích xuất thông tin cá nhân từ cuộc hội thoại (nếu có) theo format JSON:
 {
-  "name": "tên đầy đủ (nếu có update)",
+  "name": "tên người dùng",
   "age": "tuổi",
-  "job": "nghề nghiệp", 
+  "job": "nghề nghiệp",
   "hobbies": "sở thích",
-  "location": "địa điểm",
-  "nickname": "biệt danh/tên thân mật",
-  "other": "thông tin bổ sung khác"
+  "location": "nơi ở",
+  "other": "thông tin khác"
 }
-
-QUY TẮC:
-- Nếu user nói "sửa X thành Y" → trả về field với giá trị Y
-- Nếu user nói "tên là A chứ không phải B" → trả về {"name": "A"}
-- Nếu user nói "gọi tôi là X" hoặc "gọi tao là X" → trả về {"nickname": "X"}
-- CHỈ trả về các field CÓ THÔNG TIN, bỏ qua field rỗng
-- Chỉ trả về JSON thuần, không markdown, không giải thích`
+Chỉ trả về JSON, không có text thừa. Nếu không có thông tin nào thì trả về {}.`
         },
         {
           role: 'user',
-          content: `Hội thoại gần đây:\n${JSON.stringify(conversationHistory.slice(-10), null, 2)}`
+          content: JSON.stringify(conversationHistory.slice(-10))
         }
       ],
       model: 'llama-3.1-8b-instant',
       temperature: 0.1,
-      max_tokens: 600
+      max_tokens: 500
     });
     
     const result = chatCompletion.choices[0]?.message?.content || '{}';
-    const cleaned = result.replace(/```json|```/g, '').trim();
-    return JSON.parse(cleaned);
+    return JSON.parse(result.replace(/```json|```/g, '').trim());
   } catch (error) {
     console.error('Error extracting info:', error);
     return {};
   }
 }
 
-// ============ EXTRACT LOGIC ============
+// ============ FIXED EXTRACT LOGIC ============
 
+/**
+ * Kiểm tra xem có nên extract thông tin bây giờ không
+ * @param {string} userId 
+ * @param {string} conversationId 
+ * @param {Array} conversationHistory 
+ * @returns {Promise<boolean>}
+ */
 async function shouldExtractNow(userId, conversationId, conversationHistory) {
   const key = `last_extract:${userId}:${conversationId}`;
   const lastExtract = await getData(key);
   
+  // Lần đầu tiên: extract khi có đủ 5 tin để phân tích
   if (!lastExtract) {
     return conversationHistory.length >= 5;
   }
@@ -632,16 +619,26 @@ async function shouldExtractNow(userId, conversationId, conversationHistory) {
     const timeSince = Date.now() - lastExtractData.timestamp;
     const messagesSince = conversationHistory.length - lastExtractData.messageCount;
     
+    // Logic extract thông minh:
+    // 1. Đã qua 5 phút VÀ có ít nhất 3 tin mới (user chat bình thường)
+    // 2. HOẶC có 10 tin mới (user chat liên tục)
     const shouldExtractByTime = timeSince > 300000 && messagesSince >= 3;
     const shouldExtractByCount = messagesSince >= 10;
     
     return shouldExtractByTime || shouldExtractByCount;
   } catch (error) {
     console.error('Error parsing last extract data:', error);
+    // Fallback: extract nếu có >= 5 tin
     return conversationHistory.length >= 5;
   }
 }
 
+/**
+ * Đánh dấu đã extract xong
+ * @param {string} userId 
+ * @param {string} conversationId 
+ * @param {Array} conversationHistory 
+ */
 async function markExtracted(userId, conversationId, conversationHistory) {
   const key = `last_extract:${userId}:${conversationId}`;
   await setData(key, JSON.stringify({
@@ -649,36 +646,6 @@ async function markExtracted(userId, conversationId, conversationHistory) {
     messageCount: conversationHistory.length,
     extractedAt: new Date().toISOString()
   }), MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
-}
-
-// ============ 🔧 FIXED: BUILD USER PROFILE STRING ============
-
-function buildUserProfileString(profile) {
-  if (!profile || Object.keys(profile).length === 0) {
-    return '';
-  }
-
-  const lines = [];
-  
-  // Priority: nickname first
-  if (profile.nickname) {
-    lines.push(`- Gọi là: ${profile.nickname}`);
-  }
-  
-  if (profile.name) {
-    lines.push(`- Tên thật: ${profile.name}`);
-  }
-  
-  // Other fields
-  const otherFields = Object.entries(profile)
-    .filter(([k]) => k !== 'name' && k !== 'nickname')
-    .map(([k, v]) => `- ${k}: ${v}`);
-  
-  lines.push(...otherFields);
-  
-  return lines.length > 0 
-    ? `\n👤 THÔNG TIN NGƯỜI DÙNG (nhớ lâu dài):\n${lines.join('\n')}\n\n⚠️ Ưu tiên gọi người dùng bằng nickname nếu có!` 
-    : '';
 }
 
 // ============ API KEY MANAGEMENT ============
@@ -750,7 +717,7 @@ async function callGroqWithRetry(userId, messages) {
   throw new Error('Đã thử hết tất cả API keys');
 }
 
-// ============ MAIN HANDLER ============
+// ============ MAIN HANDLER (FIXED) ============
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -789,14 +756,14 @@ export default async function handler(req, res) {
 
     console.log(`📱 Request from userId: ${userId}`);
 
-    // 1. Load memory
+    // 1. Lấy memory
     let conversationHistory = await getShortTermMemory(userId, finalConversationId);
     const userProfile = await getLongTermMemory(userId);
     let existingSummary = await getSummary(userId, finalConversationId);
 
-    console.log(`💾 Loaded ${conversationHistory.length} messages, profile fields: ${Object.keys(userProfile).length}`);
+    console.log(`💾 Loaded ${conversationHistory.length} messages`);
 
-    // 2. AI-powered search detection
+    // 2. AI-POWERED SEARCH DETECTION
     let searchResult = null;
     const tempGroq = new Groq({ apiKey: API_KEYS[0] });
     
@@ -813,13 +780,13 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3. Add user message
+    // 3. Thêm tin nhắn user vào history
     conversationHistory.push({
       role: 'user',
       content: message.trim()
     });
 
-    // 4. Handle summary
+    // 4. Xử lý summary khi vượt ngưỡng (FIXED)
     let workingMemory = conversationHistory;
     
     if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
@@ -828,6 +795,7 @@ export default async function handler(req, res) {
       const oldMessages = conversationHistory.slice(0, -MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       workingMemory = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       
+      // FIXED: Chỉ tạo summary MỘT LẦN
       if (!existingSummary) {
         existingSummary = await summarizeOldMessages(tempGroq, oldMessages);
         await saveSummary(userId, finalConversationId, existingSummary);
@@ -835,7 +803,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 5. Build context - FIXED SYSTEM PROMPT
+    // 5. Xây dựng context
     const currentDate = new Date().toLocaleDateString('vi-VN', {
       weekday: 'long',
       year: 'numeric',
@@ -843,59 +811,55 @@ export default async function handler(req, res) {
       day: 'numeric'
     });
 
-    // Build profile string safely
-    const profileString = buildUserProfileString(userProfile);
-    const summaryString = existingSummary ? `\n📝 TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummary}\n` : '';
-    const searchString = searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử dụng thông tin tìm kiếm ở trên để trả lời câu hỏi.\n` : '';
-
     const systemPrompt = {
       role: 'system',
-      content: `Bạn là Kami, một AI thông minh và thân thiện được tạo ra bởi Nguyễn Đức Thạnh. Hãy trả lời bằng tiếng Việt tự nhiên và không lặp lại cùng một nội dung nhiều lần. Có thể thêm emoji tùy ngữ cảnh để trò chuyện thêm sinh động.
+      content: `Bạn là Kami, một AI thông minh và thân thiện được tao ra bởi Nguyễn Đức Thạnh. Hãy trả lời bằng tiếng Việt tự nhiên và không lặp lại cùng một nội dung nhiều lần. Có thể thêm emoji tùy ngữ cảnh để trò chuyện thêm sinh động.
+📅 Ngày hiện tại: ${currentDate}
+${Object.keys(userProfile).length > 0 ? `
+👤 THÔNG TIN NGƯỜI DÙNG (nhớ lâu dài):
+${Object.entries(userProfile).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
+` : ''}
+${existingSummary ? `📝 TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummary}\n` : ''}
 
-📅 Ngày hiện tại: ${currentDate}${profileString}${summaryString}${searchString}`
+${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử dụng thông tin tìm kiếm ở trên để trả lời câu hỏi.\n` : ''}`
     };
 
     const messages = [systemPrompt, ...workingMemory];
 
-    // 6. Call AI
+    // 6. Gọi AI
     console.log(`🤖 Calling AI with ${workingMemory.length} messages${searchResult ? ' + search' : ''}...`);
     const { groq, chatCompletion } = await callGroqWithRetry(userId, messages);
     const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
     console.log(`✅ AI responded`);
 
-    // 7. Save response to FULL conversationHistory
+    // 7. FIXED: Lưu response vào FULL conversationHistory
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
     });
 
+    // FIXED: Lưu FULL conversationHistory (không phải workingMemory)
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // 8. Smart extract with proper merge
+    // 8. FIXED Extract personal info với logic mới
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Extracting personal info (${conversationHistory.length} messages)...`);
-      const newInfo = await extractPersonalInfo(groq, conversationHistory, userProfile);
+      const newInfo = await extractPersonalInfo(groq, conversationHistory);
       
       if (Object.keys(newInfo).length > 0) {
-        const { merged, changes } = smartMergeProfile(userProfile, newInfo);
-        
-        if (changes.length > 0) {
-          await saveLongTermMemory(userId, merged);
-          await markExtracted(userId, finalConversationId, conversationHistory);
-          console.log(`✅ Profile updated (${changes.length} changes):`);
-          changes.forEach(change => console.log(`   - ${change}`));
-        } else {
-          await markExtracted(userId, finalConversationId, conversationHistory);
-          console.log(`ℹ No meaningful changes detected`);
-        }
+        const updatedProfile = { ...userProfile, ...newInfo };
+        await saveLongTermMemory(userId, updatedProfile);
+        await markExtracted(userId, finalConversationId, conversationHistory);
+        console.log(`✅ Profile updated:`, Object.keys(newInfo));
       } else {
+        // Không có info mới nhưng vẫn mark để tránh spam extract
         await markExtracted(userId, finalConversationId, conversationHistory);
         console.log(`ℹ No new personal info found`);
       }
     }
 
-    // 9. Safety check: Extract before expire (< 2 days)
+    // Safety check: Extract trước khi expire (< 2 ngày)
     if (redis) {
       const chatKey = `chat:${userId}:${finalConversationId}`;
       const ttl = await redis.ttl(chatKey);
@@ -903,17 +867,18 @@ export default async function handler(req, res) {
       
       if (daysRemaining > 0 && daysRemaining < 2 && conversationHistory.length >= 3) {
         console.log(`⚠ Safety extract - TTL < 2 days`);
-        const newInfo = await extractPersonalInfo(groq, conversationHistory, userProfile);
+        const newInfo = await extractPersonalInfo(groq, conversationHistory);
         if (Object.keys(newInfo).length > 0) {
-          const { merged } = smartMergeProfile(userProfile, newInfo);
-          await saveLongTermMemory(userId, merged);
+          const updatedProfile = { ...userProfile, ...newInfo };
+          await saveLongTermMemory(userId, updatedProfile);
         }
       }
     }
 
-    // 10. Response
+    // 9. Response
     const lastExtractData = await getData(`last_extract:${userId}:${finalConversationId}`);
     
+    // Safe parse lastExtractData
     let parsedExtractData = null;
     if (lastExtractData) {
       try {
@@ -936,7 +901,6 @@ export default async function handler(req, res) {
         workingMemorySize: workingMemory.length,
         hasSummary: !!existingSummary,
         userProfileFields: Object.keys(userProfile).length,
-        userProfile: userProfile,
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
@@ -947,6 +911,8 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('❌ Error:', error);
+    
+    // Detailed error logging
     console.error('Error stack:', error.stack);
     console.error('Error name:', error.name);
     
