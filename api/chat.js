@@ -537,20 +537,13 @@ async function summarizeOldMessages(groq, oldMessages) {
   }
 }
 
-// ============ 🔧 FIXED: SMART PROFILE MERGE ============
+// ============ 🔧 SMART PROFILE MERGE ============
 
-/**
- * Merge thông tin mới vào profile cũ một cách thông minh
- * - Chỉ update nếu giá trị mới KHÔNG RỖNG
- * - Giữ nguyên giá trị cũ nếu không có update
- * - Log chi tiết những gì đã thay đổi
- */
 function smartMergeProfile(oldProfile, newInfo) {
   const merged = { ...oldProfile };
   const changes = [];
   
   for (const [key, value] of Object.entries(newInfo)) {
-    // Kiểm tra giá trị có valid không
     const isValidValue = value && 
                         typeof value === 'string' && 
                         value.trim() !== '' && 
@@ -561,7 +554,6 @@ function smartMergeProfile(oldProfile, newInfo) {
       const oldValue = merged[key];
       merged[key] = value;
       
-      // Log thay đổi
       if (oldValue && oldValue !== value) {
         changes.push(`${key}: "${oldValue}" → "${value}"`);
       } else if (!oldValue) {
@@ -602,7 +594,7 @@ NHIỆM VỤ:
 QUY TẮC:
 - Nếu user nói "sửa X thành Y" → trả về field với giá trị Y
 - Nếu user nói "tên là A chứ không phải B" → trả về {"name": "A"}
-- Nếu user nói "gọi tôi là X" → trả về {"nickname": "X"}
+- Nếu user nói "gọi tôi là X" hoặc "gọi tao là X" → trả về {"nickname": "X"}
 - CHỈ trả về các field CÓ THÔNG TIN, bỏ qua field rỗng
 - Chỉ trả về JSON thuần, không markdown, không giải thích`
         },
@@ -657,6 +649,36 @@ async function markExtracted(userId, conversationId, conversationHistory) {
     messageCount: conversationHistory.length,
     extractedAt: new Date().toISOString()
   }), MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
+}
+
+// ============ 🔧 FIXED: BUILD USER PROFILE STRING ============
+
+function buildUserProfileString(profile) {
+  if (!profile || Object.keys(profile).length === 0) {
+    return '';
+  }
+
+  const lines = [];
+  
+  // Priority: nickname first
+  if (profile.nickname) {
+    lines.push(`- Gọi là: ${profile.nickname}`);
+  }
+  
+  if (profile.name) {
+    lines.push(`- Tên thật: ${profile.name}`);
+  }
+  
+  // Other fields
+  const otherFields = Object.entries(profile)
+    .filter(([k]) => k !== 'name' && k !== 'nickname')
+    .map(([k, v]) => `- ${k}: ${v}`);
+  
+  lines.push(...otherFields);
+  
+  return lines.length > 0 
+    ? `\n👤 THÔNG TIN NGƯỜI DÙNG (nhớ lâu dài):\n${lines.join('\n')}\n\n⚠️ Ưu tiên gọi người dùng bằng nickname nếu có!` 
+    : '';
 }
 
 // ============ API KEY MANAGEMENT ============
@@ -813,7 +835,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 5. Build context
+    // 5. Build context - FIXED SYSTEM PROMPT
     const currentDate = new Date().toLocaleDateString('vi-VN', {
       weekday: 'long',
       year: 'numeric',
@@ -821,24 +843,16 @@ export default async function handler(req, res) {
       day: 'numeric'
     });
 
+    // Build profile string safely
+    const profileString = buildUserProfileString(userProfile);
+    const summaryString = existingSummary ? `\n📝 TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummary}\n` : '';
+    const searchString = searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử dụng thông tin tìm kiếm ở trên để trả lời câu hỏi.\n` : '';
+
     const systemPrompt = {
       role: 'system',
       content: `Bạn là Kami, một AI thông minh và thân thiện được tạo ra bởi Nguyễn Đức Thạnh. Hãy trả lời bằng tiếng Việt tự nhiên và không lặp lại cùng một nội dung nhiều lần. Có thể thêm emoji tùy ngữ cảnh để trò chuyện thêm sinh động.
-📅 Ngày hiện tại: ${currentDate}
-${Object.keys(userProfile).length > 0 ? `
-👤 THÔNG TIN NGƯỜI DÙNG (nhớ lâu dài):
-${userProfile.nickname ? `- Gọi là: ${userProfile.nickname} (nickname)` : ''}
-${userProfile.name ? `- Tên thật: ${userProfile.name}` : ''}
-${Object.entries(userProfile)
-  .filter(([k]) => k !== 'name' && k !== 'nickname')
-  .map(([k, v]) => `- ${k}: ${v}`)
-  .join('\n')}
 
-⚠️ Ưu tiên gọi người dùng bằng nickname nếu có!
-` : ''}
-${existingSummary ? `📝 TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummary}\n` : ''}
-
-${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử dụng thông tin tìm kiếm ở trên để trả lời câu hỏi.\n` : ''}`
+📅 Ngày hiện tại: ${currentDate}${profileString}${summaryString}${searchString}`
     };
 
     const messages = [systemPrompt, ...workingMemory];
@@ -858,14 +872,12 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
 
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // 8. 🔧 FIXED: Smart extract with proper merge
+    // 8. Smart extract with proper merge
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Extracting personal info (${conversationHistory.length} messages)...`);
-      // 🔧 PASS CURRENT PROFILE to help AI understand corrections
       const newInfo = await extractPersonalInfo(groq, conversationHistory, userProfile);
       
       if (Object.keys(newInfo).length > 0) {
-        // 🔧 USE SMART MERGE instead of spread operator
         const { merged, changes } = smartMergeProfile(userProfile, newInfo);
         
         if (changes.length > 0) {
@@ -924,7 +936,7 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
         workingMemorySize: workingMemory.length,
         hasSummary: !!existingSummary,
         userProfileFields: Object.keys(userProfile).length,
-        userProfile: userProfile, // 🔧 ADDED: Return full profile for debugging
+        userProfile: userProfile,
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
