@@ -852,16 +852,31 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
         const updatedProfile = { ...userProfile };
         
         for (const [key, value] of Object.entries(newInfo)) {
-          // Chỉ cập nhật nếu value có nội dung thật
-          if (value && value.trim && value.trim() !== '' && value !== 'null' && value !== 'undefined') {
-            updatedProfile[key] = value.trim();
+          // Kiểm tra value có thực sự có nội dung không
+          if (value === null || value === undefined || value === 'null' || value === 'undefined') {
+            continue; // Skip, giữ nguyên giá trị cũ
           }
-          // Nếu value rỗng, giữ nguyên giá trị cũ (không ghi đè)
+          
+          // Nếu là string, kiểm tra trim
+          if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (trimmed !== '') {
+              updatedProfile[key] = trimmed;
+            }
+          } 
+          // Nếu là number, boolean, hoặc object khác, cập nhật luôn
+          else {
+            updatedProfile[key] = value;
+          }
         }
         
         await saveLongTermMemory(userId, updatedProfile);
         await markExtracted(userId, finalConversationId, conversationHistory);
-        console.log(`✅ Profile updated:`, Object.keys(newInfo).filter(k => newInfo[k] && newInfo[k].trim()));
+        console.log(`✅ Profile updated:`, Object.keys(newInfo).filter(k => {
+          const v = newInfo[k];
+          return v !== null && v !== undefined && v !== 'null' && v !== 'undefined' && 
+                 (typeof v !== 'string' || v.trim() !== '');
+        }));
       } else {
         // Không có info mới nhưng vẫn mark để tránh spam extract
         await markExtracted(userId, finalConversationId, conversationHistory);
@@ -883,8 +898,17 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
           const updatedProfile = { ...userProfile };
           
           for (const [key, value] of Object.entries(newInfo)) {
-            if (value && value.trim && value.trim() !== '' && value !== 'null' && value !== 'undefined') {
-              updatedProfile[key] = value.trim();
+            if (value === null || value === undefined || value === 'null' || value === 'undefined') {
+              continue;
+            }
+            
+            if (typeof value === 'string') {
+              const trimmed = value.trim();
+              if (trimmed !== '') {
+                updatedProfile[key] = trimmed;
+              }
+            } else {
+              updatedProfile[key] = value;
             }
           }
           
