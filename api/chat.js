@@ -15,7 +15,7 @@ if (REDIS_ENABLED) {
   }
 }
 const memoryStore = new Map();
-const searchCache = new Map();
+const searchCache = new Map(); // Cache search results
 
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
@@ -30,16 +30,17 @@ const API_KEYS = [
   process.env.GROQ_API_KEY_10
 ].filter(key => key);
 
+// Search API keys
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 const MEMORY_CONFIG = {
-  SHORT_TERM_DAYS: 14,
+  SHORT_TERM_DAYS: 14,              // Tăng lên 14 ngày (fix bug mất data)
   WORKING_MEMORY_LIMIT: 30,
   LONG_TERM_DAYS: 365,
   SUMMARY_THRESHOLD: 40,
-  EXTRACT_INTERVAL: 10,
-  SEARCH_CACHE_MINUTES: 10
+  EXTRACT_INTERVAL: 10,             // Extract mỗi 10 tin
+  SEARCH_CACHE_MINUTES: 10          // Cache search 10 phút
 };
 
 // ============ STORAGE HELPERS ============
@@ -69,12 +70,7 @@ async function getData(key) {
 
 async function setHashData(key, data, ttl = null) {
   if (redis) {
-    // ✅ FIX: Convert all values to strings for Redis
-    const stringData = {};
-    for (const [k, v] of Object.entries(data)) {
-      stringData[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
-    }
-    await redis.hset(key, stringData);
+    await redis.hset(key, data);
     if (ttl) await redis.expire(key, ttl);
     return true;
   } else {
@@ -85,17 +81,7 @@ async function setHashData(key, data, ttl = null) {
 
 async function getHashData(key) {
   if (redis) {
-    const data = await redis.hgetall(key);
-    // ✅ FIX: Parse JSON strings back
-    const parsed = {};
-    for (const [k, v] of Object.entries(data)) {
-      try {
-        parsed[k] = JSON.parse(v);
-      } catch {
-        parsed[k] = v;
-      }
-    }
-    return parsed;
+    return await redis.hgetall(key);
   } else {
     const item = memoryStore.get(key);
     if (!item) return {};
@@ -114,8 +100,9 @@ async function setExpire(key, ttl) {
   return true;
 }
 
-// ============ SEARCH APIs ============
+// ============ SEARCH APIs với Retry & Timeout ============
 
+// Helper: Retry với exponential backoff
 async function retryWithBackoff(fn, maxRetries = 2) {
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -127,9 +114,11 @@ async function retryWithBackoff(fn, maxRetries = 2) {
   }
 }
 
+// 1. Wikipedia API (FREE ∞)
 async function searchWikipedia(query) {
   try {
     return await retryWithBackoff(async () => {
+      // Bước 1: Search để tìm tên bài viết
       const searchUrl = 'https://vi.wikipedia.org/w/api.php';
       const searchResponse = await axios.get(searchUrl, {
         params: {
@@ -148,6 +137,7 @@ async function searchWikipedia(query) {
 
       const pageTitle = titles[0];
 
+      // Bước 2: Lấy summary
       const summaryUrl = `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pageTitle)}`;
       const summaryResponse = await axios.get(summaryUrl, {
         timeout: 4000
@@ -170,9 +160,10 @@ async function searchWikipedia(query) {
   }
 }
 
+// 2. Serper.dev API
 async function searchSerper(query) {
   if (!SERPER_API_KEY) {
-    console.warn('⚠️ Serper API key not configured');
+    console.warn('⚠ Serper API key not configured');
     return null;
   }
 
@@ -210,9 +201,10 @@ async function searchSerper(query) {
   }
 }
 
+// 3. Tavily AI
 async function searchTavily(query) {
   if (!TAVILY_API_KEY) {
-    console.warn('⚠️ Tavily API key not configured');
+    console.warn('⚠ Tavily API key not configured');
     return null;
   }
 
@@ -250,27 +242,33 @@ async function searchTavily(query) {
 // ============ AI-POWERED SEARCH DETECTION ============
 
 async function shouldSearch(message, groq) {
+  // Quick keyword check first (fast path)
   const lowerQuery = message.toLowerCase();
   
   const definiteSearchKeywords = [
-    'tìm kiếm', 'search', 'tra cứu', 'google', 'bing',
-    'tìm đi', 'tìm lại', 'tìm lại đi', 'xem lại', 
-    'tìm giúp', 'tra giúp', 'kiểm tra lại', 'search lại',
-    'tra lại', 'xác minh', 'chắc chắn không', 'có đúng không',
-    'giá bitcoin', 'giá vàng', 'giá dầu', 'tỷ giá',
-    'thời tiết', 'nhiệt độ',
-    'tin tức', 'mới nhất', 'hiện tại', 'hôm nay', 'bây giờ',
-    'bao nhiêu', 'mấy giờ', 'khi nào'
-  ];
-  
+    // Tìm kiếm cơ bản
+  'tìm kiếm', 'search', 'tra cứu', 'google', 'bing',
+  // Tìm lại (khi user nghi ngờ)
+  'tìm đi', 'tìm lại', 'tìm lại đi', 'xem lại', 
+  'tìm giúp', 'tra giúp', 'kiểm tra lại', 'search lại',
+  'tra lại', 'xác minh', 'chắc chắn không', 'có đúng không',
+  // Real-time data
+  'giá bitcoin', 'giá vàng', 'giá dầu', 'tỷ giá',
+  'thời tiết', 'nhiệt độ',
+  'tin tức', 'mới nhất', 'hiện tại', 'hôm nay', 'bây giờ',
+  // Câu hỏi trực tiếp
+  'bao nhiêu', 'mấy giờ', 'khi nào'
+];  
   if (definiteSearchKeywords.some(kw => lowerQuery.includes(kw))) {
     return { needsSearch: true, confidence: 1.0, type: 'realtime' };
   }
 
+  // Nếu câu hỏi ngắn và không rõ ràng, skip AI detection
   if (message.length < 10) {
     return { needsSearch: false, confidence: 0 };
   }
 
+  // AI-powered detection cho các case phức tạp
   try {
     const prompt = `Phân tích câu hỏi sau và xác định có cần tìm kiếm thông tin không:
 
@@ -305,10 +303,12 @@ Chỉ trả về JSON, không có text thừa.`;
     };
   } catch (error) {
     console.error('AI search detection error:', error);
+    // Fallback to keyword-based detection
     return analyzeQueryKeywords(message);
   }
 }
 
+// Fallback keyword analysis
 function analyzeQueryKeywords(query) {
   const lowerQuery = query.toLowerCase();
   
@@ -327,7 +327,7 @@ function analyzeQueryKeywords(query) {
   return { needsSearch: false, confidence: 0.3 };
 }
 
-// ============ SMART SEARCH ============
+// ============ SMART SEARCH với Cache ============
 
 function getCacheKey(query) {
   return `search:${query.toLowerCase().trim()}`;
@@ -358,6 +358,7 @@ function saveToCache(query, result) {
     timestamp: Date.now()
   });
   
+  // Giới hạn cache size (max 100 entries)
   if (searchCache.size > 100) {
     const firstKey = searchCache.keys().next().value;
     searchCache.delete(firstKey);
@@ -365,6 +366,7 @@ function saveToCache(query, result) {
 }
 
 async function smartSearch(query, searchType, groq) {
+  // Check cache first
   const cached = getFromCache(query);
   if (cached) return cached;
 
@@ -373,7 +375,9 @@ async function smartSearch(query, searchType, groq) {
   let result = null;
 
   try {
+    // Strategy based on type
     if (searchType === 'knowledge') {
+      // Wikipedia first (free + best for knowledge)
       result = await searchWikipedia(query);
       if (result) {
         saveToCache(query, result);
@@ -382,6 +386,7 @@ async function smartSearch(query, searchType, groq) {
     }
 
     if (searchType === 'realtime') {
+      // Serper first (best for real-time)
       if (SERPER_API_KEY) {
         result = await searchSerper(query);
         if (result) {
@@ -392,6 +397,7 @@ async function smartSearch(query, searchType, groq) {
     }
 
     if (searchType === 'research') {
+      // Tavily first (best for research)
       if (TAVILY_API_KEY) {
         result = await searchTavily(query);
         if (result) {
@@ -401,6 +407,7 @@ async function smartSearch(query, searchType, groq) {
       }
     }
 
+    // Fallback: Try all in order (Wikipedia → Serper → Tavily)
     console.log(`🔄 Fallback search mode...`);
     
     result = await searchWikipedia(query);
@@ -466,12 +473,13 @@ function formatSearchResult(searchData) {
   return formatted;
 }
 
-// ============ MEMORY FUNCTIONS ============
+// ============ MEMORY FUNCTIONS (FIXED) ============
 
 async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
   const history = await getData(key);
   
+  // Safe parsing
   if (!history) return [];
   
   if (typeof history === 'string') {
@@ -509,14 +517,7 @@ async function getLongTermMemory(userId) {
 
 async function saveLongTermMemory(userId, profileData) {
   const key = `user:profile:${userId}`;
-  
-  // ✅ FIX: Ensure all values are strings
-  const sanitizedData = {};
-  for (const [k, v] of Object.entries(profileData)) {
-    sanitizedData[k] = typeof v === 'string' ? v : JSON.stringify(v);
-  }
-  
-  await setHashData(key, sanitizedData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
+  await setHashData(key, profileData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
 }
 
 async function getSummary(userId, conversationId) {
@@ -575,15 +576,7 @@ async function extractPersonalInfo(groq, conversationHistory) {
   "location": "nơi ở",
   "other": "thông tin khác"
 }
-
-⚠️ QUAN TRỌNG: 
-- Tất cả giá trị PHẢI là string đơn giản
-- KHÔNG được trả về nested objects hay arrays
-- CHỈ trả về các field CÓ THÔNG TIN, không trả về field rỗng
-- Nếu không tìm thấy thông tin nào thì trả về {}
-
-Ví dụ ĐÚNG: {"name": "An", "age": "25"}
-Ví dụ SAI: {"name": "", "age": ""} ❌`
+Chỉ trả về JSON, không có text thừa. Nếu không có thông tin nào thì trả về {}.`
         },
         {
           role: 'user',
@@ -596,42 +589,27 @@ Ví dụ SAI: {"name": "", "age": ""} ❌`
     });
     
     const result = chatCompletion.choices[0]?.message?.content || '{}';
-    const parsed = JSON.parse(result.replace(/```json|```/g, '').trim());
-    
-    // ✅ FIX: Only keep fields with actual content
-    const sanitized = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      let finalValue = '';
-      
-      if (typeof value === 'string') {
-        finalValue = value.trim();
-      } else if (Array.isArray(value)) {
-        finalValue = value.filter(Boolean).join(', ').trim();
-      } else if (typeof value === 'object' && value !== null) {
-        finalValue = JSON.stringify(value);
-      } else {
-        finalValue = String(value).trim();
-      }
-      
-      // ✅ ONLY SAVE IF HAS CONTENT
-      if (finalValue && finalValue.length > 0) {
-        sanitized[key] = finalValue;
-      }
-    }
-    
-    return sanitized;
+    return JSON.parse(result.replace(/```json|```/g, '').trim());
   } catch (error) {
     console.error('Error extracting info:', error);
     return {};
   }
 }
 
-// ============ SMART EXTRACT LOGIC ============
+// ============ FIXED EXTRACT LOGIC ============
 
+/**
+ * Kiểm tra xem có nên extract thông tin bây giờ không
+ * @param {string} userId 
+ * @param {string} conversationId 
+ * @param {Array} conversationHistory 
+ * @returns {Promise<boolean>}
+ */
 async function shouldExtractNow(userId, conversationId, conversationHistory) {
   const key = `last_extract:${userId}:${conversationId}`;
   const lastExtract = await getData(key);
   
+  // Lần đầu tiên: extract khi có đủ 5 tin để phân tích
   if (!lastExtract) {
     return conversationHistory.length >= 5;
   }
@@ -641,16 +619,26 @@ async function shouldExtractNow(userId, conversationId, conversationHistory) {
     const timeSince = Date.now() - lastExtractData.timestamp;
     const messagesSince = conversationHistory.length - lastExtractData.messageCount;
     
+    // Logic extract thông minh:
+    // 1. Đã qua 5 phút VÀ có ít nhất 3 tin mới (user chat bình thường)
+    // 2. HOẶC có 10 tin mới (user chat liên tục)
     const shouldExtractByTime = timeSince > 300000 && messagesSince >= 3;
     const shouldExtractByCount = messagesSince >= 10;
     
     return shouldExtractByTime || shouldExtractByCount;
   } catch (error) {
     console.error('Error parsing last extract data:', error);
+    // Fallback: extract nếu có >= 5 tin
     return conversationHistory.length >= 5;
   }
 }
 
+/**
+ * Đánh dấu đã extract xong
+ * @param {string} userId 
+ * @param {string} conversationId 
+ * @param {Array} conversationHistory 
+ */
 async function markExtracted(userId, conversationId, conversationHistory) {
   const key = `last_extract:${userId}:${conversationId}`;
   await setData(key, JSON.stringify({
@@ -729,7 +717,7 @@ async function callGroqWithRetry(userId, messages) {
   throw new Error('Đã thử hết tất cả API keys');
 }
 
-// ============ MAIN HANDLER ============
+// ============ MAIN HANDLER (FIXED) ============
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -763,17 +751,19 @@ export default async function handler(req, res) {
     }
 
     if (!REDIS_ENABLED) {
-      console.warn('⚠️ Redis not configured - using in-memory storage');
+      console.warn('⚠ Redis not configured - using in-memory storage');
     }
 
     console.log(`📱 Request from userId: ${userId}`);
 
+    // 1. Lấy memory
     let conversationHistory = await getShortTermMemory(userId, finalConversationId);
     const userProfile = await getLongTermMemory(userId);
     let existingSummary = await getSummary(userId, finalConversationId);
 
     console.log(`💾 Loaded ${conversationHistory.length} messages`);
 
+    // 2. AI-POWERED SEARCH DETECTION
     let searchResult = null;
     const tempGroq = new Groq({ apiKey: API_KEYS[0] });
     
@@ -786,15 +776,17 @@ export default async function handler(req, res) {
       if (searchResult) {
         console.log(`✅ Search successful: ${searchResult.source}`);
       } else {
-        console.log(`⚠️ Search returned no results`);
+        console.log(`⚠ Search returned no results`);
       }
     }
 
+    // 3. Thêm tin nhắn user vào history
     conversationHistory.push({
       role: 'user',
       content: message.trim()
     });
 
+    // 4. Xử lý summary khi vượt ngưỡng (FIXED)
     let workingMemory = conversationHistory;
     
     if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
@@ -803,6 +795,7 @@ export default async function handler(req, res) {
       const oldMessages = conversationHistory.slice(0, -MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       workingMemory = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       
+      // FIXED: Chỉ tạo summary MỘT LẦN
       if (!existingSummary) {
         existingSummary = await summarizeOldMessages(tempGroq, oldMessages);
         await saveSummary(userId, finalConversationId, existingSummary);
@@ -810,6 +803,7 @@ export default async function handler(req, res) {
       }
     }
 
+    // 5. Xây dựng context
     const currentDate = new Date().toLocaleDateString('vi-VN', {
       weekday: 'long',
       year: 'numeric',
@@ -826,71 +820,65 @@ ${Object.keys(userProfile).length > 0 ? `
 ${Object.entries(userProfile).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
 ` : ''}
 ${existingSummary ? `📝 TÓM TẮT CUỘC TRÒ CHUYỆN TRƯỚC:\n${existingSummary}\n` : ''}
-${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠️ Hãy ưu tiên sử dụng thông tin tìm kiếm ở trên để trả lời câu hỏi.\n` : ''}`
+
+${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử dụng thông tin tìm kiếm ở trên để trả lời câu hỏi.\n` : ''}`
     };
 
     const messages = [systemPrompt, ...workingMemory];
 
+    // 6. Gọi AI
     console.log(`🤖 Calling AI with ${workingMemory.length} messages${searchResult ? ' + search' : ''}...`);
     const { groq, chatCompletion } = await callGroqWithRetry(userId, messages);
     const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
     console.log(`✅ AI responded`);
 
+    // 7. FIXED: Lưu response vào FULL conversationHistory
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
     });
 
+    // FIXED: Lưu FULL conversationHistory (không phải workingMemory)
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // ✅ FIXED: Smart merge - only update fields with values
+    // 8. FIXED Extract personal info với logic mới
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Extracting personal info (${conversationHistory.length} messages)...`);
       const newInfo = await extractPersonalInfo(groq, conversationHistory);
       
       if (Object.keys(newInfo).length > 0) {
-        // ✅ SMART MERGE: Keep old data, only update new fields
-        const updatedProfile = { ...userProfile };
-        
-        for (const [key, value] of Object.entries(newInfo)) {
-          if (value && value.trim().length > 0) {
-            updatedProfile[key] = value;
-            console.log(`  📝 Updated ${key}: ${value}`);
-          }
-        }
-        
+        const updatedProfile = { ...userProfile, ...newInfo };
         await saveLongTermMemory(userId, updatedProfile);
         await markExtracted(userId, finalConversationId, conversationHistory);
-        console.log(`✅ Profile updated with ${Object.keys(newInfo).length} new fields`);
+        console.log(`✅ Profile updated:`, Object.keys(newInfo));
       } else {
+        // Không có info mới nhưng vẫn mark để tránh spam extract
         await markExtracted(userId, finalConversationId, conversationHistory);
-        console.log(`ℹ️ No new personal info found`);
+        console.log(`ℹ No new personal info found`);
       }
     }
 
+    // Safety check: Extract trước khi expire (< 2 ngày)
     if (redis) {
       const chatKey = `chat:${userId}:${finalConversationId}`;
       const ttl = await redis.ttl(chatKey);
       const daysRemaining = ttl / 86400;
       
       if (daysRemaining > 0 && daysRemaining < 2 && conversationHistory.length >= 3) {
-        console.log(`⚠️ Safety extract - TTL < 2 days`);
+        console.log(`⚠ Safety extract - TTL < 2 days`);
         const newInfo = await extractPersonalInfo(groq, conversationHistory);
         if (Object.keys(newInfo).length > 0) {
-          const updatedProfile = { ...userProfile };
-          for (const [key, value] of Object.entries(newInfo)) {
-            if (value && value.trim().length > 0) {
-              updatedProfile[key] = value;
-            }
-          }
+          const updatedProfile = { ...userProfile, ...newInfo };
           await saveLongTermMemory(userId, updatedProfile);
         }
       }
     }
 
+    // 9. Response
     const lastExtractData = await getData(`last_extract:${userId}:${finalConversationId}`);
     
+    // Safe parse lastExtractData
     let parsedExtractData = null;
     if (lastExtractData) {
       try {
@@ -923,6 +911,8 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠️ Hãy ưu tiên s
 
   } catch (error) {
     console.error('❌ Error:', error);
+    
+    // Detailed error logging
     console.error('Error stack:', error.stack);
     console.error('Error name:', error.name);
     
