@@ -842,16 +842,26 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
     // FIXED: Lưu FULL conversationHistory (không phải workingMemory)
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // 8. FIXED Extract personal info với logic mới
+    // 8. FIXED Extract personal info với logic merge an toàn
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Extracting personal info (${conversationHistory.length} messages)...`);
       const newInfo = await extractPersonalInfo(groq, conversationHistory);
       
       if (Object.keys(newInfo).length > 0) {
-        const updatedProfile = { ...userProfile, ...newInfo };
+        // FIXED: Chỉ merge các field có giá trị thực sự (không rỗng, null, undefined)
+        const updatedProfile = { ...userProfile };
+        
+        for (const [key, value] of Object.entries(newInfo)) {
+          // Chỉ cập nhật nếu value có nội dung thật
+          if (value && value.trim && value.trim() !== '' && value !== 'null' && value !== 'undefined') {
+            updatedProfile[key] = value.trim();
+          }
+          // Nếu value rỗng, giữ nguyên giá trị cũ (không ghi đè)
+        }
+        
         await saveLongTermMemory(userId, updatedProfile);
         await markExtracted(userId, finalConversationId, conversationHistory);
-        console.log(`✅ Profile updated:`, Object.keys(newInfo));
+        console.log(`✅ Profile updated:`, Object.keys(newInfo).filter(k => newInfo[k] && newInfo[k].trim()));
       } else {
         // Không có info mới nhưng vẫn mark để tránh spam extract
         await markExtracted(userId, finalConversationId, conversationHistory);
@@ -869,7 +879,15 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
         console.log(`⚠ Safety extract - TTL < 2 days`);
         const newInfo = await extractPersonalInfo(groq, conversationHistory);
         if (Object.keys(newInfo).length > 0) {
-          const updatedProfile = { ...userProfile, ...newInfo };
+          // FIXED: Áp dụng cùng logic merge an toàn
+          const updatedProfile = { ...userProfile };
+          
+          for (const [key, value] of Object.entries(newInfo)) {
+            if (value && value.trim && value.trim() !== '' && value !== 'null' && value !== 'undefined') {
+              updatedProfile[key] = value.trim();
+            }
+          }
+          
           await saveLongTermMemory(userId, updatedProfile);
         }
       }
