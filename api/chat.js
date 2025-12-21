@@ -698,10 +698,12 @@ async function callGroqWithRetry(userId, messages) {
       return { groq, chatCompletion };
 
     } catch (error) {
-      const isQuotaError = error.message?.includes('quota') || 
-                          error.message?.includes('rate limit') ||
-                          error.status === 429 ||
-                          error.status === 403;
+      const isQuotaError = 
+  error.message?.includes('quota') || 
+  error.message?.includes('rate limit') ||
+  error.message?.includes('Rate limit') ||
+  error.status === 429 ||
+  error.status === 403;
 
       if (isQuotaError && attempts < maxAttempts - 1) {
         console.log(`Key ${currentKeyIndex + 1} hết quota, chuyển key...`);
@@ -714,7 +716,7 @@ async function callGroqWithRetry(userId, messages) {
     }
   }
 
-  throw new Error('Đã thử hết tất cả API keys');
+  throw new Error('Đã thử hết tất cả dữ liệu');
 }
 
 // ============ MAIN HANDLER (FIXED) ============
