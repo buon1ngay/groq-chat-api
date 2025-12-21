@@ -1,7 +1,6 @@
-import Groq from 'groq-sdk';
+retryWithBackoffimport Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 import axios from 'axios';
-import { generateImage } from '../utils/image-api.js';
 let redis = null;
 const REDIS_ENABLED = process.env.UPSTASH_REDIS_URL && process.env.UPSTASH_REDIS_TOKEN;
 
@@ -227,7 +226,7 @@ async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function retryWithBackoff(fn, providerName, maxRetries = IMAGE_CONFIG.MAX_RETRIES) {
+async function retryImageGeneration(fn, providerName, maxRetries = IMAGE_CONFIG.MAX_RETRIES) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
