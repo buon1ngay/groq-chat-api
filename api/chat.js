@@ -1,7 +1,7 @@
 import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 import axios from 'axios';
-
+import { generateImage } from '../utils/image-api.js';
 let redis = null;
 const REDIS_ENABLED = process.env.UPSTASH_REDIS_URL && process.env.UPSTASH_REDIS_TOKEN;
 
