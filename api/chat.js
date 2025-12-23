@@ -61,8 +61,24 @@ class SimpleCache {
   }
 }
 
-const searchCache = new SimpleCache(600000, 100); // 10 phút, max 100 entries
-const detectionCache = new SimpleCache(1800000, 200); // 30 phút, max 200 entries
+// SEARCH CONFIG - Configurable thresholds
+// ✅ FIX #1: DI CHUYỂN LÊN TRƯỚC KHI DÙNG
+const SEARCH_CONFIG = {
+  // Ngưỡng confidence rằng CẦN search (searchConfidence)
+  // Cao → chắc chắn cần search
+  SEARCH_CONFIDENCE_THRESHOLD: 0.85,
+  
+  // Ngưỡng confidence rằng AI CÓ THỂ trả lời (answerConfidence)  
+  // Thấp → không tự tin → cần search
+  ANSWER_CONFIDENCE_THRESHOLD: 0.4,
+  
+  MIN_CONFIDENCE_FOR_AI: 0.9,
+  CACHE_TTL_MINUTES: 10,
+  DETECTION_CACHE_TTL_MINUTES: 30
+};
+
+const searchCache = new SimpleCache(SEARCH_CONFIG.CACHE_TTL_MINUTES * 60000, 100);
+const detectionCache = new SimpleCache(SEARCH_CONFIG.DETECTION_CACHE_TTL_MINUTES * 60000, 200);
 
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
@@ -89,6 +105,110 @@ const MEMORY_CONFIG = {
   EXTRACT_INTERVAL: 10,
   SEARCH_CACHE_MINUTES: 10
 };
+
+// Helper: Get dynamic confidence threshold based on context
+function getSearchThreshold(message, conversationHistory) {
+  let threshold = SEARCH_CONFIG.SEARCH_CONFIDENCE_THRESHOLD;
+  
+  // Giảm threshold nếu user yêu cầu tìm kiếm rõ ràng
+  const explicitSearchPhrases = [
+    'tìm kiếm', 'search', 'tra cứu', 'google',
+    'tìm đi', 'tìm lại', 'tìm giúp'
+  ];
+  
+  if (explicitSearchPhrases.some(p => message.toLowerCase().includes(p))) {
+    threshold = 0.5;
+    console.log(`🔽 Lowered threshold to ${threshold} (explicit search request)`);
+  }
+  
+  // Tăng threshold nếu đã search nhiều gần đây
+  const recentSearchCount = conversationHistory
+    .slice(-5)
+    .filter(m => m.role === 'assistant' && m.content.includes('🔍'))
+    .length;
+  
+  if (recentSearchCount >= 3) {
+    threshold = Math.min(0.95, threshold + 0.1);
+    console.log(`🔼 Raised threshold to ${threshold} (too many recent searches)`);
+  }
+  
+  return threshold;
+}
+
+// Helper: Calculate if AI can answer confidently (no search needed)
+function canAnswerConfidently(message) {
+  const lower = message.toLowerCase();
+  
+  // 1. Historical facts - AI has knowledge
+  const historicalKeywords = [
+    'ai phát minh', 'ai sáng tạo', 'ai tạo ra',
+    'lịch sử', 'năm nào', 'thế kỷ', 'thời kỳ',
+    'trước đây', 'xưa kia'
+  ];
+  
+  if (historicalKeywords.some(kw => lower.includes(kw))) {
+    // Check if asking about PAST (confident) vs PRESENT (need search)
+    const presentIndicators = ['hiện nay', 'bây giờ', 'hôm nay', 'năm nay'];
+    if (!presentIndicators.some(p => lower.includes(p))) {
+      return { canAnswer: true, confidence: 0.9, reason: 'historical_fact' };
+    }
+  }
+  
+  // 2. Basic concepts - AI knows well
+  const conceptPatterns = [
+    /^(.*)(là gì|nghĩa là gì|định nghĩa|ý nghĩa)/,
+    /^(giải thích|cho.*biết về|nói về)/,
+    /^(tại sao|vì sao)/,
+    /^(như thế nào|thế nào|cách nào)/
+  ];
+  
+  const isConceptQuestion = conceptPatterns.some(p => p.test(lower));
+  const commonTopics = [
+    'python', 'javascript', 'lập trình', 'code',
+    'toán học', 'vật lý', 'hóa học', 'sinh học',
+    'văn học', 'nghệ thuật', 'triết học'
+  ];
+  
+  if (isConceptQuestion && commonTopics.some(t => lower.includes(t))) {
+    return { canAnswer: true, confidence: 0.95, reason: 'basic_concept' };
+  }
+  
+  // 3. Advice/Opinion - AI can give without search
+  const advicePatterns = [
+    /^(nên|có nên|tôi nên)/,
+    /^(làm sao|làm thế nào)/,
+    /^(bạn nghĩ|theo bạn|ý kiến)/
+  ];
+  
+  if (advicePatterns.some(p => p.test(lower))) {
+    return { canAnswer: true, confidence: 0.85, reason: 'advice_request' };
+  }
+  
+  // 4. Real-time data - AI CANNOT answer
+  const realtimeIndicators = [
+    'giá', 'bao nhiêu', 'mấy giờ',
+    'thời tiết', 'nhiệt độ',
+    'tin tức', 'mới nhất', 'hiện tại', 'hôm nay', 'bây giờ',
+    'gần đây', 'vừa rồi'
+  ];
+  
+  if (realtimeIndicators.some(kw => lower.includes(kw))) {
+    return { canAnswer: false, confidence: 0.1, reason: 'realtime_data' };
+  }
+  
+  // 5. Specific current events/people/places - uncertain
+  const specificIndicators = [
+    'ai là', 'hiện giờ', 'đang', 'năm 202',
+    'ceo của', 'chủ tịch của', 'thủ tướng'
+  ];
+  
+  if (specificIndicators.some(kw => lower.includes(kw))) {
+    return { canAnswer: false, confidence: 0.2, reason: 'current_specific' };
+  }
+  
+  // Default: moderate confidence
+  return { canAnswer: true, confidence: 0.6, reason: 'general' };
+}
 
 // Search analytics
 const searchStats = {
@@ -361,7 +481,7 @@ function quickKeywordCheck(message) {
 async function shouldSearch(message, groq) {
   searchStats.total++;
   
-  // STEP 1: Quick keyword check (fast path)
+  // LAYER 1: Quick keyword check (0.001s)
   const quickCheck = quickKeywordCheck(message);
   if (quickCheck) {
     console.log(`⚡ Quick decision: ${quickCheck.shouldSearch ? 'SEARCH' : 'SKIP'} (${quickCheck.reason})`);
@@ -375,7 +495,33 @@ async function shouldSearch(message, groq) {
     };
   }
   
-  // STEP 2: Check detection cache
+  // LAYER 2: Check if AI can answer confidently (no AI call needed)
+  const answerAbility = canAnswerConfidently(message);
+  console.log(`🧠 Answer ability: ${answerAbility.canAnswer ? 'CAN' : 'CANNOT'} (confidence: ${answerAbility.confidence}, reason: ${answerAbility.reason})`);
+  
+  // If AI CANNOT answer confidently → MUST search
+  if (!answerAbility.canAnswer || answerAbility.confidence < SEARCH_CONFIG.ANSWER_CONFIDENCE_THRESHOLD) {
+    const decision = {
+      needsSearch: true,
+      confidence: 0.9,
+      type: answerAbility.reason === 'realtime_data' ? 'realtime' : 'knowledge'
+    };
+    console.log(`✅ Search decision: YES (AI cannot answer confidently)`);
+    return decision;
+  }
+  
+  // If AI CAN answer confidently → NO search needed
+  // ✅ FIX #2: DÙNG CONFIG THAY VÌ HARD-CODE 0.85
+  if (answerAbility.confidence >= SEARCH_CONFIG.MIN_CONFIDENCE_FOR_AI) {
+    const decision = {
+      needsSearch: false,
+      confidence: answerAbility.confidence
+    };
+    console.log(`✅ Search decision: NO (AI can answer confidently)`);
+    return decision;
+  }
+  
+  // LAYER 3: Check detection cache
   const cacheKey = message.toLowerCase().trim().substring(0, 100);
   const cached = detectionCache.get(cacheKey);
   if (cached) {
@@ -383,15 +529,15 @@ async function shouldSearch(message, groq) {
     return cached;
   }
   
-  // STEP 3: Heuristic check (no AI needed)
+  // LAYER 4: Heuristic check (no AI needed)
   const heuristic = analyzeWithHeuristics(message);
-  if (heuristic.confidence >= 0.9) {
+  if (heuristic.confidence >= SEARCH_CONFIG.MIN_CONFIDENCE_FOR_AI) {
     console.log(`🎯 Heuristic decision: ${heuristic.needsSearch ? 'SEARCH' : 'SKIP'}`);
     detectionCache.set(cacheKey, heuristic);
     return heuristic;
   }
   
-  // STEP 4: AI-powered detection (only for ambiguous cases)
+  // LAYER 5: AI-powered detection (only for ambiguous cases)
   console.log(`🤖 Using AI detection for: "${message.substring(0, 50)}..."`);
   
   try {
@@ -892,13 +1038,16 @@ export default async function handler(req, res) {
 
     // 2. IMPROVED SEARCH DETECTION
     let searchResult = null;
-    const tempGroq = new Groq({ apiKey: API_KEYS[0] });
+    // ✅ FIX #3 (BONUS): Dùng key ngẫu nhiên thay vì key[0] cố định
+    const tempKeyIndex = Math.floor(Math.random() * API_KEYS.length);
+    const tempGroq = new Groq({ apiKey: API_KEYS[tempKeyIndex] });
     
     const searchDecision = await shouldSearch(message, tempGroq);
     console.log(`🤔 Search decision: ${searchDecision.needsSearch ? 'YES' : 'NO'} (confidence: ${searchDecision.confidence})`);
 
-    // FIXED: Chỉ search khi confidence cao
-    if (searchDecision.needsSearch && searchDecision.confidence >= 0.85) {
+    // FIXED: Logic đúng - search khi needsSearch = true (không cần check confidence nữa)
+    // Vì logic đã được xử lý trong shouldSearch() với canAnswerConfidently()
+    if (searchDecision.needsSearch) {
       searchResult = await smartSearch(message, searchDecision.type, tempGroq);
       
       if (searchResult) {
@@ -906,8 +1055,6 @@ export default async function handler(req, res) {
       } else {
         console.log(`⚠ Search returned no results`);
       }
-    } else if (searchDecision.needsSearch && searchDecision.confidence < 0.85) {
-      console.log(`⏭ Skipped search - confidence too low (${searchDecision.confidence})`);
     }
 
     // 3. Add user message to history
