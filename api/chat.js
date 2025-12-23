@@ -158,10 +158,21 @@ async function setExpire(key, ttl) {
 
 function safeParseJSON(text, fallback = {}) {
   try {
-    const cleaned = text.replace(/```json|```/g, '').trim();
+    // Remove any markdown formatting
+    let cleaned = text.trim();
+    cleaned = cleaned.replace(/```json\n?/g, '');
+    cleaned = cleaned.replace(/```\n?/g, '');
+    
+    // Extract JSON object if wrapped in extra text
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleaned = jsonMatch[0];
+    }
+    
     return JSON.parse(cleaned);
   } catch (error) {
-    console.error('JSON parse error:', error);
+    console.error('JSON parse error:', error.message);
+    console.error('Attempted to parse:', text.substring(0, 100));
     return fallback;
   }
 }
@@ -384,41 +395,52 @@ async function shouldSearch(message, groq) {
   console.log(`🤖 Using AI detection for: "${message.substring(0, 50)}..."`);
   
   try {
-    const prompt = `Phân tích xem câu hỏi sau có CẦN TÌM KIẾM THÔNG TIN TRÊN INTERNET không.
+    const prompt = `Analyze if this question needs internet search. Return ONLY a JSON object, no other text.
 
-Câu hỏi: "${message}"
+Question: "${message}"
 
-CHỈ TÌM KIẾM KHI:
-- Cần thông tin thời gian thực (giá cả, thời tiết, tin tức)
-- Hỏi về sự kiện/người/địa điểm cụ thể mà AI có thể không biết
-- Yêu cầu so sánh/đánh giá sản phẩm/dịch vụ hiện tại
+SEARCH when:
+- Real-time data needed (prices, weather, news)
+- Specific events/people/places AI may not know
+- Current product/service comparisons
 
-KHÔNG TÌM KIẾM KHI:
-- Trò chuyện thông thường, chào hỏi
-- Hỏi về kiến thức chung, khái niệm cơ bản
-- Yêu cầu lời khuyên, ý kiến cá nhân
-- Hỏi về lịch sử, khoa học, văn hóa phổ thông
+DON'T SEARCH when:
+- Casual conversation, greetings
+- General knowledge, basic concepts
+- Advice, personal opinions
+- History, science, common culture
 
-Trả về JSON:
+Response format (ONLY JSON, nothing else):
 {
-  "needsSearch": true/false,
-  "confidence": 0.0-1.0,
-  "type": "realtime/knowledge/research/none",
-  "reason": "lý do ngắn"
+  "needsSearch": true,
+  "confidence": 0.9,
+  "type": "realtime",
+  "reason": "short reason"
 }`;
 
     const response = await groq.chat.completions.create({
       messages: [
-        { role: 'system', content: 'Bạn là chuyên gia phân tích câu hỏi. Chỉ trả về JSON.' },
+        { 
+          role: 'system', 
+          content: 'You are a query analyzer. Return ONLY valid JSON. No explanations, no markdown, no extra text. Just pure JSON.' 
+        },
         { role: 'user', content: prompt }
       ],
       model: 'llama-3.1-8b-instant',
       temperature: 0.1,
-      max_tokens: 150
+      max_tokens: 150,
+      response_format: { type: "json_object" }
     });
 
     const result = response.choices[0]?.message?.content || '{}';
-    const analysis = safeParseJSON(result, { 
+    
+    // Extra cleaning for safety
+    let cleaned = result.trim();
+    cleaned = cleaned.replace(/```json\n?/g, '');
+    cleaned = cleaned.replace(/```\n?/g, '');
+    cleaned = cleaned.replace(/^[^{]*({.*})[^}]*$/s, '$1');
+    
+    const analysis = safeParseJSON(cleaned, { 
       needsSearch: false, 
       confidence: 0.3,
       type: 'none'
@@ -435,6 +457,7 @@ Trả về JSON:
     
   } catch (error) {
     console.error('AI search detection error:', error);
+    console.error('Falling back to heuristics');
     return analyzeWithHeuristics(message);
   }
 }
