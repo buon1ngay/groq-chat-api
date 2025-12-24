@@ -61,20 +61,13 @@ class SimpleCache {
   }
 }
 
-// SEARCH CONFIG - Configurable thresholds
-// ✅ FIX #1: DI CHUYỂN LÊN TRƯỚC KHI DÙNG
+// ✅ OPTIMIZED: Tối ưu config để cân bằng speed vs accuracy
 const SEARCH_CONFIG = {
-  // Ngưỡng confidence rằng CẦN search (searchConfidence)
-  // Cao → chắc chắn cần search
-  SEARCH_CONFIDENCE_THRESHOLD: 0.85,
-  
-  // Ngưỡng confidence rằng AI CÓ THỂ trả lời (answerConfidence)  
-  // Thấp → không tự tin → cần search
-  ANSWER_CONFIDENCE_THRESHOLD: 0.4,
-  
-  MIN_CONFIDENCE_FOR_AI: 0.9,
-  CACHE_TTL_MINUTES: 10,
-  DETECTION_CACHE_TTL_MINUTES: 30
+  SEARCH_CONFIDENCE_THRESHOLD: 0.75,  // Giảm từ 0.85 - search linh hoạt hơn
+  ANSWER_CONFIDENCE_THRESHOLD: 0.5,   // Tăng từ 0.4 - chặt hơn khi quyết định search
+  MIN_CONFIDENCE_FOR_AI: 0.85,        // Giảm từ 0.9 - AI tự trả lời nhiều hơn
+  CACHE_TTL_MINUTES: 30,              // Tăng từ 10 - giảm API calls
+  DETECTION_CACHE_TTL_MINUTES: 60     // Tăng từ 30 - cache detection lâu hơn
 };
 
 const searchCache = new SimpleCache(SEARCH_CONFIG.CACHE_TTL_MINUTES * 60000, 100);
@@ -105,35 +98,6 @@ const MEMORY_CONFIG = {
   EXTRACT_INTERVAL: 10,
   SEARCH_CACHE_MINUTES: 10
 };
-
-// Helper: Get dynamic confidence threshold based on context
-function getSearchThreshold(message, conversationHistory) {
-  let threshold = SEARCH_CONFIG.SEARCH_CONFIDENCE_THRESHOLD;
-  
-  // Giảm threshold nếu user yêu cầu tìm kiếm rõ ràng
-  const explicitSearchPhrases = [
-    'tìm kiếm', 'search', 'tra cứu', 'google',
-    'tìm đi', 'tìm lại', 'tìm giúp'
-  ];
-  
-  if (explicitSearchPhrases.some(p => message.toLowerCase().includes(p))) {
-    threshold = 0.5;
-    console.log(`🔽 Lowered threshold to ${threshold} (explicit search request)`);
-  }
-  
-  // Tăng threshold nếu đã search nhiều gần đây
-  const recentSearchCount = conversationHistory
-    .slice(-5)
-    .filter(m => m.role === 'assistant' && m.content.includes('🔍'))
-    .length;
-  
-  if (recentSearchCount >= 3) {
-    threshold = Math.min(0.95, threshold + 0.1);
-    console.log(`🔼 Raised threshold to ${threshold} (too many recent searches)`);
-  }
-  
-  return threshold;
-}
 
 // Helper: Calculate if AI can answer confidently (no search needed)
 function canAnswerConfidently(message) {
@@ -478,14 +442,71 @@ function quickKeywordCheck(message) {
   return null; // Cần thêm phân tích
 }
 
+// ✅ OPTIMIZED: Heuristic analysis với cache kết quả
+function analyzeWithHeuristics(query) {
+  const lower = query.toLowerCase();
+  const words = query.split(/\s+/).length;
+  
+  // Câu quá ngắn (< 3 từ) - thường là casual chat
+  if (words < 3) {
+    return { needsSearch: false, confidence: 0.85 };
+  }
+  
+  // Các mẫu câu hỏi kiến thức
+  const knowledgePatterns = [
+    /^(.*)(là gì|nghĩa là gì|ý nghĩa|định nghĩa)/,
+    /^(giải thích|cho.*biết về|nói về)/,
+    /^(tại sao|vì sao|tại vì sao)/,
+    /^(như thế nào|thế nào|ra sao)/
+  ];
+  
+  const hasKnowledgePattern = knowledgePatterns.some(p => p.test(lower));
+  
+  // Câu hỏi kiến thức phổ thông - không cần search
+  const commonKnowledge = [
+    'python', 'javascript', 'lập trình', 'code', 'coding',
+    'toán học', 'vật lý', 'hóa học', 'sinh học',
+    'lịch sử', 'địa lý', 'văn học', 'tiếng anh'
+  ];
+  
+  const isCommonTopic = commonKnowledge.some(t => lower.includes(t));
+  
+  if (hasKnowledgePattern && isCommonTopic) {
+    return { needsSearch: false, confidence: 0.9 };
+  }
+  
+  // Các từ khóa chắc chắn cần search
+  const mustSearch = [
+    'bao nhiêu', 'mấy giờ', 'khi nào',
+    'hôm nay', 'hiện tại', 'bây giờ',
+    'mới nhất', 'gần đây', 'vừa rồi'
+  ];
+  
+  if (mustSearch.some(kw => lower.includes(kw))) {
+    return { needsSearch: true, confidence: 0.9, type: 'realtime' };
+  }
+  
+  // Default: không search
+  return { needsSearch: false, confidence: 0.7 };
+}
+
+// ✅ OPTIMIZED: Cache detection TRƯỚC mọi thứ, tái sử dụng heuristic
 async function shouldSearch(message, groq) {
   searchStats.total++;
+  
+  // ✅ LAYER 0: Check cache TRƯỚC (0.001ms) - OPTIMIZATION #2
+  const cacheKey = message.toLowerCase().trim().substring(0, 100);
+  const cached = detectionCache.get(cacheKey);
+  if (cached) {
+    console.log(`💾 Detection cache hit`);
+    return cached;
+  }
   
   // LAYER 1: Quick keyword check (0.001s)
   const quickCheck = quickKeywordCheck(message);
   if (quickCheck) {
     console.log(`⚡ Quick decision: ${quickCheck.shouldSearch ? 'SEARCH' : 'SKIP'} (${quickCheck.reason})`);
-    return quickCheck.shouldSearch ? {
+    const decision = quickCheck.shouldSearch ? {
       needsSearch: true,
       confidence: quickCheck.confidence,
       type: quickCheck.type || 'knowledge'
@@ -493,6 +514,8 @@ async function shouldSearch(message, groq) {
       needsSearch: false,
       confidence: 1.0
     };
+    detectionCache.set(cacheKey, decision); // ✅ Cache ngay
+    return decision;
   }
   
   // LAYER 2: Check if AI can answer confidently (no AI call needed)
@@ -507,29 +530,22 @@ async function shouldSearch(message, groq) {
       type: answerAbility.reason === 'realtime_data' ? 'realtime' : 'knowledge'
     };
     console.log(`✅ Search decision: YES (AI cannot answer confidently)`);
+    detectionCache.set(cacheKey, decision); // ✅ Cache ngay
     return decision;
   }
   
   // If AI CAN answer confidently → NO search needed
-  // ✅ FIX #2: DÙNG CONFIG THAY VÌ HARD-CODE 0.85
   if (answerAbility.confidence >= SEARCH_CONFIG.MIN_CONFIDENCE_FOR_AI) {
     const decision = {
       needsSearch: false,
       confidence: answerAbility.confidence
     };
     console.log(`✅ Search decision: NO (AI can answer confidently)`);
+    detectionCache.set(cacheKey, decision); // ✅ Cache ngay
     return decision;
   }
   
-  // LAYER 3: Check detection cache
-  const cacheKey = message.toLowerCase().trim().substring(0, 100);
-  const cached = detectionCache.get(cacheKey);
-  if (cached) {
-    console.log(`💾 Detection cache hit`);
-    return cached;
-  }
-  
-  // LAYER 4: Heuristic check (no AI needed)
+  // LAYER 3: Heuristic check - ✅ CACHE KẾT QUẢ để tái sử dụng
   const heuristic = analyzeWithHeuristics(message);
   if (heuristic.confidence >= SEARCH_CONFIG.MIN_CONFIDENCE_FOR_AI) {
     console.log(`🎯 Heuristic decision: ${heuristic.needsSearch ? 'SEARCH' : 'SKIP'}`);
@@ -537,7 +553,7 @@ async function shouldSearch(message, groq) {
     return heuristic;
   }
   
-  // LAYER 5: AI-powered detection (only for ambiguous cases)
+  // LAYER 4: AI-powered detection (only for ambiguous cases)
   console.log(`🤖 Using AI detection for: "${message.substring(0, 50)}..."`);
   
   try {
@@ -604,56 +620,10 @@ Response format (ONLY JSON, nothing else):
   } catch (error) {
     console.error('AI search detection error:', error);
     console.error('Falling back to heuristics');
-    return analyzeWithHeuristics(message);
+    // ✅ Tái sử dụng heuristic đã tính ở LAYER 3 (không tính lại)
+    detectionCache.set(cacheKey, heuristic);
+    return heuristic;
   }
-}
-
-// Heuristic analysis
-function analyzeWithHeuristics(query) {
-  const lower = query.toLowerCase();
-  const words = query.split(/\s+/).length;
-  
-  // Câu quá ngắn (< 3 từ) - thường là casual chat
-  if (words < 3) {
-    return { needsSearch: false, confidence: 0.85 };
-  }
-  
-  // Các mẫu câu hỏi kiến thức
-  const knowledgePatterns = [
-    /^(.*)(là gì|nghĩa là gì|ý nghĩa|định nghĩa)/,
-    /^(giải thích|cho.*biết về|nói về)/,
-    /^(tại sao|vì sao|tại vì sao)/,
-    /^(như thế nào|thế nào|ra sao)/
-  ];
-  
-  const hasKnowledgePattern = knowledgePatterns.some(p => p.test(lower));
-  
-  // Câu hỏi kiến thức phổ thông - không cần search
-  const commonKnowledge = [
-    'python', 'javascript', 'lập trình', 'code', 'coding',
-    'toán học', 'vật lý', 'hóa học', 'sinh học',
-    'lịch sử', 'địa lý', 'văn học', 'tiếng anh'
-  ];
-  
-  const isCommonTopic = commonKnowledge.some(t => lower.includes(t));
-  
-  if (hasKnowledgePattern && isCommonTopic) {
-    return { needsSearch: false, confidence: 0.9 };
-  }
-  
-  // Các từ khóa chắc chắn cần search
-  const mustSearch = [
-    'bao nhiêu', 'mấy giờ', 'khi nào',
-    'hôm nay', 'hiện tại', 'bây giờ',
-    'mới nhất', 'gần đây', 'vừa rồi'
-  ];
-  
-  if (mustSearch.some(kw => lower.includes(kw))) {
-    return { needsSearch: true, confidence: 0.9, type: 'realtime' };
-  }
-  
-  // Default: không search
-  return { needsSearch: false, confidence: 0.7 };
 }
 
 // ============ SMART SEARCH ============
@@ -1038,15 +1008,12 @@ export default async function handler(req, res) {
 
     // 2. IMPROVED SEARCH DETECTION
     let searchResult = null;
-    // ✅ FIX #3 (BONUS): Dùng key ngẫu nhiên thay vì key[0] cố định
     const tempKeyIndex = Math.floor(Math.random() * API_KEYS.length);
     const tempGroq = new Groq({ apiKey: API_KEYS[tempKeyIndex] });
     
     const searchDecision = await shouldSearch(message, tempGroq);
     console.log(`🤔 Search decision: ${searchDecision.needsSearch ? 'YES' : 'NO'} (confidence: ${searchDecision.confidence})`);
 
-    // FIXED: Logic đúng - search khi needsSearch = true (không cần check confidence nữa)
-    // Vì logic đã được xử lý trong shouldSearch() với canAnswerConfidently()
     if (searchDecision.needsSearch) {
       searchResult = await smartSearch(message, searchDecision.type, tempGroq);
       
@@ -1063,7 +1030,7 @@ export default async function handler(req, res) {
       content: message.trim()
     });
 
-    // 4. Handle summary when exceeding threshold
+    // 4. ✅ OPTIMIZED: Handle summary ASYNC (không block response) - OPTIMIZATION #3
     let workingMemory = conversationHistory;
     
     if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
@@ -1073,9 +1040,12 @@ export default async function handler(req, res) {
       workingMemory = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       
       if (!existingSummary) {
-        existingSummary = await summarizeOldMessages(tempGroq, oldMessages);
-        await saveSummary(userId, finalConversationId, existingSummary);
-        console.log(`✅ Summary created`);
+        console.log(`📝 Background summarizing (non-blocking)...`);
+        // ✅ Fire & forget - không đợi summary xong
+        summarizeOldMessages(tempGroq, oldMessages)
+          .then(summary => saveSummary(userId, finalConversationId, summary))
+          .then(() => console.log(`✅ Summary created in background`))
+          .catch(err => console.error('Background summary error:', err));
       }
     }
 
@@ -1117,76 +1087,85 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
 
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // 8. Extract personal info with safe merge
+    // 8. ✅ OPTIMIZED: Extract personal info ASYNC (không block response) - OPTIMIZATION #3
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
-      console.log(`🔍 Extracting personal info (${conversationHistory.length} messages)...`);
-      const newInfo = await extractPersonalInfo(groq, conversationHistory);
+      console.log(`🔍 Background extracting personal info (non-blocking)...`);
       
-      if (Object.keys(newInfo).length > 0) {
-        const updatedProfile = { ...userProfile };
-        
-        for (const [key, value] of Object.entries(newInfo)) {
-          if (value === null || value === undefined || value === 'null' || value === 'undefined') {
-            continue;
-          }
-          
-          if (typeof value === 'string') {
-            const trimmed = value.trim();
-            if (trimmed !== '' && trimmed !== 'không có' && trimmed !== 'chưa có') {
-              updatedProfile[key] = trimmed;
+      // ✅ Fire & forget - không đợi extract xong
+      extractPersonalInfo(groq, conversationHistory)
+        .then(async (newInfo) => {
+          if (Object.keys(newInfo).length > 0) {
+            const updatedProfile = { ...userProfile };
+            
+            for (const [key, value] of Object.entries(newInfo)) {
+              if (value === null || value === undefined || value === 'null' || value === 'undefined') {
+                continue;
+              }
+              
+              if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (trimmed !== '' && trimmed !== 'không có' && trimmed !== 'chưa có') {
+                  updatedProfile[key] = trimmed;
+                }
+              } else {
+                updatedProfile[key] = value;
+              }
+            }
+            
+            await saveLongTermMemory(userId, updatedProfile);
+            await markExtracted(userId, finalConversationId, conversationHistory);
+            
+            const extractedFields = Object.keys(newInfo).filter(k => {
+              const v = newInfo[k];
+              return v !== null && v !== undefined && v !== 'null' && v !== 'undefined' && 
+                     (typeof v !== 'string' || (v.trim() !== '' && v.trim() !== 'không có'));
+            });
+            
+            if (extractedFields.length > 0) {
+              console.log(`✅ Profile updated in background: ${extractedFields.join(', ')}`);
             }
           } else {
-            updatedProfile[key] = value;
+            await markExtracted(userId, finalConversationId, conversationHistory);
+            console.log(`ℹ No new personal info found`);
           }
-        }
-        
-        await saveLongTermMemory(userId, updatedProfile);
-        await markExtracted(userId, finalConversationId, conversationHistory);
-        
-        const extractedFields = Object.keys(newInfo).filter(k => {
-          const v = newInfo[k];
-          return v !== null && v !== undefined && v !== 'null' && v !== 'undefined' && 
-                 (typeof v !== 'string' || (v.trim() !== '' && v.trim() !== 'không có'));
-        });
-        
-        if (extractedFields.length > 0) {
-          console.log(`✅ Profile updated: ${extractedFields.join(', ')}`);
-        }
-      } else {
-        await markExtracted(userId, finalConversationId, conversationHistory);
-        console.log(`ℹ No new personal info found`);
-      }
+        })
+        .catch(err => console.error('Background extract error:', err));
     }
 
-    // Safety check: Extract before expire (< 2 days)
+    // Safety check: Extract before expire (< 2 days) - ASYNC
     if (redis) {
       const chatKey = `chat:${userId}:${finalConversationId}`;
       const ttl = await redis.ttl(chatKey);
       const daysRemaining = ttl / 86400;
       
       if (daysRemaining > 0 && daysRemaining < 2 && conversationHistory.length >= 3) {
-        console.log(`⚠ Safety extract - TTL < 2 days`);
-        const newInfo = await extractPersonalInfo(groq, conversationHistory);
-        if (Object.keys(newInfo).length > 0) {
-          const updatedProfile = { ...userProfile };
-          
-          for (const [key, value] of Object.entries(newInfo)) {
-            if (value === null || value === undefined || value === 'null' || value === 'undefined') {
-              continue;
-            }
-            
-            if (typeof value === 'string') {
-              const trimmed = value.trim();
-              if (trimmed !== '' && trimmed !== 'không có' && trimmed !== 'chưa có') {
-                updatedProfile[key] = trimmed;
+        console.log(`⚠ Safety extract - TTL < 2 days (background)`);
+        // ✅ Fire & forget
+        extractPersonalInfo(groq, conversationHistory)
+          .then(async (newInfo) => {
+            if (Object.keys(newInfo).length > 0) {
+              const updatedProfile = { ...userProfile };
+              
+              for (const [key, value] of Object.entries(newInfo)) {
+                if (value === null || value === undefined || value === 'null' || value === 'undefined') {
+                  continue;
+                }
+                
+                if (typeof value === 'string') {
+                  const trimmed = value.trim();
+                  if (trimmed !== '' && trimmed !== 'không có' && trimmed !== 'chưa có') {
+                    updatedProfile[key] = trimmed;
+                  }
+                } else {
+                  updatedProfile[key] = value;
+                }
               }
-            } else {
-              updatedProfile[key] = value;
+              
+              await saveLongTermMemory(userId, updatedProfile);
+              console.log(`✅ Safety profile saved in background`);
             }
-          }
-          
-          await saveLongTermMemory(userId, updatedProfile);
-        }
+          })
+          .catch(err => console.error('Background safety extract error:', err));
       }
     }
 
@@ -1214,6 +1193,7 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
       });
     }
     
+    // ✅ Response ngay - không đợi background tasks
     return res.status(200).json({
       success: true,
       message: assistantMessage,
