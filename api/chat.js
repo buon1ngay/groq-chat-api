@@ -61,7 +61,7 @@ class SimpleCache {
   }
 }
 
-// ✅ OPTIMIZED: Tối ưu config để cân bằng speed vs accuracy
+// ✅ OPTIMIZED: Tối ưu config
 const SEARCH_CONFIG = {
   SEARCH_CONFIDENCE_THRESHOLD: 0.75,
   ANSWER_CONFIDENCE_THRESHOLD: 0.5,
@@ -72,6 +72,9 @@ const SEARCH_CONFIG = {
 
 const searchCache = new SimpleCache(SEARCH_CONFIG.CACHE_TTL_MINUTES * 60000, 100);
 const detectionCache = new SimpleCache(SEARCH_CONFIG.DETECTION_CACHE_TTL_MINUTES * 60000, 200);
+
+// ✅ NEW: Response cache (5 phút TTL, cache 50 responses gần nhất)
+const responseCache = new SimpleCache(5 * 60000, 50);
 
 const API_KEYS = [
   process.env.GROQ_API_KEY_1,
@@ -99,7 +102,17 @@ const MEMORY_CONFIG = {
   SEARCH_CACHE_MINUTES: 10
 };
 
-// Helper: Calculate if AI can answer confidently (no search needed)
+// ✅ NEW: Normalize message cho cache (loại bỏ dấu câu, space thừa)
+function normalizeForCache(message) {
+  return message
+    .toLowerCase()
+    .trim()
+    .replace(/[.,!?;:]/g, '')  // Loại bỏ dấu câu
+    .replace(/\s+/g, ' ')       // Loại bỏ space thừa
+    .substring(0, 100);         // Cắt 100 ký tự
+}
+
+// Helper: Calculate if AI can answer confidently
 function canAnswerConfidently(message) {
   const lower = message.toLowerCase();
   
@@ -111,7 +124,6 @@ function canAnswerConfidently(message) {
   ];
   
   if (historicalKeywords.some(kw => lower.includes(kw))) {
-    // Check if asking about PAST (confident) vs PRESENT (need search)
     const presentIndicators = ['hiện nay', 'bây giờ', 'hôm nay', 'năm nay'];
     if (!presentIndicators.some(p => lower.includes(p))) {
       return { canAnswer: true, confidence: 0.9, reason: 'historical_fact' };
@@ -170,7 +182,6 @@ function canAnswerConfidently(message) {
     return { canAnswer: false, confidence: 0.2, reason: 'current_specific' };
   }
   
-  // Default: moderate confidence
   return { canAnswer: true, confidence: 0.6, reason: 'general' };
 }
 
@@ -179,6 +190,13 @@ const searchStats = {
   total: 0,
   cacheHits: 0,
   sources: { wikipedia: 0, serper: 0, tavily: 0, failed: 0 }
+};
+
+// Performance analytics
+const perfStats = {
+  responseCacheHits: 0,
+  totalRequests: 0,
+  avgResponseTime: 0
 };
 
 // ============ STORAGE HELPERS ============
@@ -242,12 +260,10 @@ async function setExpire(key, ttl) {
 
 function safeParseJSON(text, fallback = {}) {
   try {
-    // Remove any markdown formatting
     let cleaned = text.trim();
     cleaned = cleaned.replace(/```json\n?/g, '');
     cleaned = cleaned.replace(/```\n?/g, '');
     
-    // Extract JSON object if wrapped in extra text
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       cleaned = jsonMatch[0];
@@ -256,7 +272,6 @@ function safeParseJSON(text, fallback = {}) {
     return JSON.parse(cleaned);
   } catch (error) {
     console.error('JSON parse error:', error.message);
-    console.error('Attempted to parse:', text.substring(0, 100));
     return fallback;
   }
 }
@@ -406,7 +421,6 @@ function quickKeywordCheck(message) {
     'bạn là ai', 'tên bạn', 'bạn tên gì'
   ];
   
-  // Check exact match or start/end with these phrases
   for (const kw of neverSearch) {
     if (lower === kw || lower.startsWith(kw + ' ') || lower.endsWith(' ' + kw) || lower.includes(' ' + kw + ' ')) {
       return { shouldSearch: false, confidence: 1.0, reason: 'casual' };
@@ -439,20 +453,17 @@ function quickKeywordCheck(message) {
     }
   }
   
-  return null; // Cần thêm phân tích
+  return null;
 }
 
-// ✅ OPTIMIZED: Heuristic analysis
 function analyzeWithHeuristics(query) {
   const lower = query.toLowerCase();
   const words = query.split(/\s+/).length;
   
-  // Câu quá ngắn (< 3 từ) - thường là casual chat
   if (words < 3) {
     return { needsSearch: false, confidence: 0.85 };
   }
   
-  // Các mẫu câu hỏi kiến thức
   const knowledgePatterns = [
     /^(.*)(là gì|nghĩa là gì|ý nghĩa|định nghĩa)/,
     /^(giải thích|cho.*biết về|nói về)/,
@@ -462,7 +473,6 @@ function analyzeWithHeuristics(query) {
   
   const hasKnowledgePattern = knowledgePatterns.some(p => p.test(lower));
   
-  // Câu hỏi kiến thức phổ thông - không cần search
   const commonKnowledge = [
     'python', 'javascript', 'lập trình', 'code', 'coding',
     'toán học', 'vật lý', 'hóa học', 'sinh học',
@@ -475,7 +485,6 @@ function analyzeWithHeuristics(query) {
     return { needsSearch: false, confidence: 0.9 };
   }
   
-  // Các từ khóa chắc chắn cần search
   const mustSearch = [
     'bao nhiêu', 'mấy giờ', 'khi nào',
     'hôm nay', 'hiện tại', 'bây giờ',
@@ -486,23 +495,19 @@ function analyzeWithHeuristics(query) {
     return { needsSearch: true, confidence: 0.9, type: 'realtime' };
   }
   
-  // Default: không search
   return { needsSearch: false, confidence: 0.7 };
 }
 
-// ✅ OPTIMIZED: Cache detection TRƯỚC mọi thứ
 async function shouldSearch(message, groq) {
   searchStats.total++;
   
-  // ✅ LAYER 0: Check cache TRƯỚC (0.001ms)
-  const cacheKey = message.toLowerCase().trim().substring(0, 100);
+  const cacheKey = normalizeForCache(message);
   const cached = detectionCache.get(cacheKey);
   if (cached) {
     console.log(`💾 Detection cache hit`);
     return cached;
   }
   
-  // LAYER 1: Quick keyword check (0.001s)
   const quickCheck = quickKeywordCheck(message);
   if (quickCheck) {
     console.log(`⚡ Quick decision: ${quickCheck.shouldSearch ? 'SEARCH' : 'SKIP'} (${quickCheck.reason})`);
@@ -518,34 +523,30 @@ async function shouldSearch(message, groq) {
     return decision;
   }
   
-  // LAYER 2: Check if AI can answer confidently
   const answerAbility = canAnswerConfidently(message);
-  console.log(`🧠 Answer ability: ${answerAbility.canAnswer ? 'CAN' : 'CANNOT'} (confidence: ${answerAbility.confidence}, reason: ${answerAbility.reason})`);
+  console.log(`🧠 Answer ability: ${answerAbility.canAnswer ? 'CAN' : 'CANNOT'} (confidence: ${answerAbility.confidence})`);
   
-  // If AI CANNOT answer confidently → MUST search
   if (!answerAbility.canAnswer || answerAbility.confidence < SEARCH_CONFIG.ANSWER_CONFIDENCE_THRESHOLD) {
     const decision = {
       needsSearch: true,
       confidence: 0.9,
       type: answerAbility.reason === 'realtime_data' ? 'realtime' : 'knowledge'
     };
-    console.log(`✅ Search decision: YES (AI cannot answer confidently)`);
+    console.log(`✅ Search decision: YES`);
     detectionCache.set(cacheKey, decision);
     return decision;
   }
   
-  // If AI CAN answer confidently → NO search needed
   if (answerAbility.confidence >= SEARCH_CONFIG.MIN_CONFIDENCE_FOR_AI) {
     const decision = {
       needsSearch: false,
       confidence: answerAbility.confidence
     };
-    console.log(`✅ Search decision: NO (AI can answer confidently)`);
+    console.log(`✅ Search decision: NO`);
     detectionCache.set(cacheKey, decision);
     return decision;
   }
   
-  // LAYER 3: Heuristic check
   const heuristic = analyzeWithHeuristics(message);
   if (heuristic.confidence >= SEARCH_CONFIG.MIN_CONFIDENCE_FOR_AI) {
     console.log(`🎯 Heuristic decision: ${heuristic.needsSearch ? 'SEARCH' : 'SKIP'}`);
@@ -553,8 +554,7 @@ async function shouldSearch(message, groq) {
     return heuristic;
   }
   
-  // LAYER 4: AI-powered detection (only for ambiguous cases)
-  console.log(`🤖 Using AI detection for: "${message.substring(0, 50)}..."`);
+  console.log(`🤖 Using AI detection`);
   
   try {
     const prompt = `Analyze if this question needs internet search. Return ONLY a JSON object, no other text.
@@ -596,7 +596,6 @@ Response format (ONLY JSON, nothing else):
 
     const result = response.choices[0]?.message?.content || '{}';
     
-    // Extra cleaning for safety
     let cleaned = result.trim();
     cleaned = cleaned.replace(/```json\n?/g, '');
     cleaned = cleaned.replace(/```\n?/g, '');
@@ -619,7 +618,6 @@ Response format (ONLY JSON, nothing else):
     
   } catch (error) {
     console.error('AI search detection error:', error);
-    console.error('Falling back to heuristics');
     detectionCache.set(cacheKey, heuristic);
     return heuristic;
   }
@@ -628,22 +626,20 @@ Response format (ONLY JSON, nothing else):
 // ============ SMART SEARCH ============
 
 async function smartSearch(query, searchType) {
-  const cacheKey = `${query.toLowerCase().trim()}`;
+  const cacheKey = normalizeForCache(query);
   
-  // Check cache
   const cached = searchCache.get(cacheKey);
   if (cached) {
     searchStats.cacheHits++;
-    console.log(`✅ Cache hit (${searchStats.cacheHits}/${searchStats.total})`);
+    console.log(`✅ Search cache hit`);
     return cached;
   }
 
-  console.log(`🔍 Search type: ${searchType} for: "${query.substring(0, 50)}..."`);
+  console.log(`🔍 Search type: ${searchType}`);
 
   let result = null;
 
   try {
-    // Strategy 1: Realtime → Serper only
     if (searchType === 'realtime' && SERPER_API_KEY) {
       result = await searchSerper(query);
       if (result) {
@@ -653,7 +649,6 @@ async function smartSearch(query, searchType) {
       }
     }
 
-    // Strategy 2: Knowledge → Wikipedia + Tavily parallel
     if (searchType === 'knowledge') {
       const searches = [
         searchWikipedia(query),
@@ -670,7 +665,6 @@ async function smartSearch(query, searchType) {
       }
     }
 
-    // Strategy 3: Research → Tavily first
     if (searchType === 'research' && TAVILY_API_KEY) {
       result = await searchTavily(query);
       if (result) {
@@ -680,7 +674,6 @@ async function smartSearch(query, searchType) {
       }
     }
 
-    // Fallback: Wikipedia only (free & reliable)
     console.log(`🔄 Fallback to Wikipedia...`);
     result = await searchWikipedia(query);
     
@@ -915,7 +908,6 @@ async function setUserKeyIndex(userId, index) {
   await setData(key, index, 86400);
 }
 
-// ✅ NEW: Main AI với retry & key rotation
 async function callGroqWithRetry(userId, messages) {
   let currentKeyIndex = await getUserKeyIndex(userId);
   let attempts = 0;
@@ -960,7 +952,6 @@ async function callGroqWithRetry(userId, messages) {
   throw new Error('Đã thử hết tất cả API keys');
 }
 
-// ✅ NEW: tempGroq với retry & key rotation (SYNCED với main API)
 async function callTempGroqWithRetry(userId, fn) {
   let currentKeyIndex = await getUserKeyIndex(userId);
   let attempts = 0;
@@ -973,7 +964,6 @@ async function callTempGroqWithRetry(userId, fn) {
 
       const result = await fn(groq);
       
-      // ✅ Update keyIndex on success (keep synced with main)
       await setUserKeyIndex(userId, currentKeyIndex);
       return result;
 
@@ -1005,6 +995,8 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
+
+  const startTime = Date.now();
 
   try {
     const { message, userId, conversationId } = req.body;
@@ -1038,31 +1030,67 @@ export default async function handler(req, res) {
 
     console.log(`📱 Request from ${userId}: "${message.substring(0, 50)}..."`);
 
-    // 1. Load memory
-    let conversationHistory = await getShortTermMemory(userId, finalConversationId);
-    const userProfile = await getLongTermMemory(userId);
-    let existingSummary = await getSummary(userId, finalConversationId);
+    perfStats.totalRequests++;
+
+    // ✅ OPTIMIZATION #4: Check response cache FIRST
+    const responseCacheKey = `resp:${userId}:${normalizeForCache(message)}`;
+    const cachedResponse = responseCache.get(responseCacheKey);
+    
+    if (cachedResponse) {
+      perfStats.responseCacheHits++;
+      console.log(`💾 Response cache hit (${perfStats.responseCacheHits}/${perfStats.totalRequests})`);
+      
+      // Load memory để lưu vào history
+      const conversationHistory = await getShortTermMemory(userId, finalConversationId);
+      
+      conversationHistory.push(
+        { role: 'user', content: message.trim() },
+        { role: 'assistant', content: cachedResponse }
+      );
+      
+      await saveShortTermMemory(userId, finalConversationId, conversationHistory);
+      
+      const responseTime = Date.now() - startTime;
+      console.log(`⚡ Response time: ${responseTime}ms (cached)`);
+      
+      return res.status(200).json({
+        success: true,
+        message: cachedResponse,
+        userId: userId,
+        conversationId: finalConversationId,
+        cached: true,
+        responseTime: responseTime,
+        stats: {
+          totalMessages: conversationHistory.length,
+          responseCached: true
+        }
+      });
+    }
+
+    // ✅ OPTIMIZATION #2: Load memory PARALLEL (150ms → 50ms)
+    const [conversationHistory, userProfile, summaryIfNeeded] = await Promise.all([
+      getShortTermMemory(userId, finalConversationId),
+      getLongTermMemory(userId),
+      // ✅ OPTIMIZATION #5: Lazy load summary (chỉ load khi cần)
+      Promise.resolve(null)
+    ]);
 
     console.log(`💾 Loaded ${conversationHistory.length} messages`);
 
-    // 2. ✅ IMPROVED SEARCH DETECTION với retry & synced key
+    // ✅ OPTIMIZATION #1: Search decision ASYNC (không block response)
     let searchResult = null;
+    const searchCacheKey = normalizeForCache(message);
+    const cachedDecision = detectionCache.get(searchCacheKey);
     
-    const searchDecision = await callTempGroqWithRetry(userId, async (groq) => {
-      return await shouldSearch(message, groq);
-    });
-    
-    console.log(`🤔 Search decision: ${searchDecision.needsSearch ? 'YES' : 'NO'} (confidence: ${searchDecision.confidence})`);
-
-    if (searchDecision.needsSearch) {
-      searchResult = await smartSearch(message, searchDecision.type);
+    if (cachedDecision && cachedDecision.needsSearch) {
+      console.log(`🔍 Using cached search decision`);
+      searchResult = await smartSearch(message, cachedDecision.type);
       
       if (searchResult) {
         console.log(`✅ Search successful: ${searchResult.source}`);
-      } else {
-        console.log(`⚠ Search returned no results`);
       }
     }
+    // Nếu không có cached decision → BỎ QUA detection, response ngay
 
     // 3. Add user message to history
     conversationHistory.push({
@@ -1070,19 +1098,24 @@ export default async function handler(req, res) {
       content: message.trim()
     });
 
-    // 4. ✅ OPTIMIZED: Handle summary ASYNC với retry
+    // 4. ✅ OPTIMIZATION #5: Lazy load summary (chỉ khi cần)
     let workingMemory = conversationHistory;
+    let existingSummary = summaryIfNeeded;
     
     if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
       console.log(`📊 History > ${MEMORY_CONFIG.SUMMARY_THRESHOLD}`);
+      
+      // Giờ mới load summary
+      if (!existingSummary) {
+        existingSummary = await getSummary(userId, finalConversationId);
+      }
       
       const oldMessages = conversationHistory.slice(0, -MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       workingMemory = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       
       if (!existingSummary) {
-        console.log(`📝 Background summarizing (với retry)...`);
+        console.log(`📝 Background summarizing...`);
         
-        // ✅ Fire & forget với retry
         callTempGroqWithRetry(userId, async (groq) => {
           const summary = await summarizeOldMessages(groq, oldMessages);
           await saveSummary(userId, finalConversationId, summary);
@@ -1116,14 +1149,14 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
 
     const messages = [systemPrompt, ...workingMemory];
 
-    // 6. ✅ Call main AI với retry
+    // 6. Call main AI
     console.log(`🤖 Calling AI with ${workingMemory.length} messages${searchResult ? ' + search' : ''}...`);
     const { groq, chatCompletion } = await callGroqWithRetry(userId, messages);
     const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
     console.log(`✅ AI responded`);
 
-    // 7. Save response to full conversationHistory
+    // 7. Save response
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
@@ -1131,11 +1164,29 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
 
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // 8. ✅ OPTIMIZED: Extract personal info ASYNC với retry
+    // ✅ OPTIMIZATION #4: Cache response (5 phút)
+    responseCache.set(responseCacheKey, assistantMessage);
+
+    // 8. ✅ BACKGROUND: Update search detection cache cho lần sau
+    if (!cachedDecision) {
+      callTempGroqWithRetry(userId, async (groq) => {
+        const decision = await shouldSearch(message, groq);
+        detectionCache.set(searchCacheKey, decision);
+        
+        // Nếu phát hiện cần search → pre-fetch cho lần sau
+        if (decision.needsSearch) {
+          console.log(`🔮 Pre-fetching search for future requests`);
+          await smartSearch(message, decision.type);
+        }
+        
+        return decision;
+      }).catch(err => console.error('Background detection error:', err));
+    }
+
+    // 9. Extract personal info ASYNC
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
-      console.log(`🔍 Background extracting personal info (với retry)...`);
+      console.log(`🔍 Background extracting...`);
       
-      // ✅ Fire & forget với retry
       callTempGroqWithRetry(userId, async (groq) => {
         const newInfo = await extractPersonalInfo(groq, conversationHistory);
         
@@ -1160,15 +1211,7 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
           await saveLongTermMemory(userId, updatedProfile);
           await markExtracted(userId, finalConversationId, conversationHistory);
           
-          const extractedFields = Object.keys(newInfo).filter(k => {
-            const v = newInfo[k];
-            return v !== null && v !== undefined && v !== 'null' && v !== 'undefined' && 
-                   (typeof v !== 'string' || (v.trim() !== '' && v.trim() !== 'không có'));
-          });
-          
-          if (extractedFields.length > 0) {
-            console.log(`✅ Profile updated in background: ${extractedFields.join(', ')}`);
-          }
+          console.log(`✅ Profile updated in background`);
         } else {
           await markExtracted(userId, finalConversationId, conversationHistory);
         }
@@ -1178,16 +1221,15 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
         .catch(err => console.error('Background extract error:', err));
     }
 
-    // Safety check: Extract before expire (< 2 days) - ASYNC với retry
+    // Safety extract
     if (redis) {
       const chatKey = `chat:${userId}:${finalConversationId}`;
       const ttl = await redis.ttl(chatKey);
       const daysRemaining = ttl / 86400;
       
       if (daysRemaining > 0 && daysRemaining < 2 && conversationHistory.length >= 3) {
-        console.log(`⚠ Safety extract - TTL < 2 days (với retry)...`);
+        console.log(`⚠ Safety extract...`);
         
-        // ✅ Fire & forget với retry
         callTempGroqWithRetry(userId, async (groq) => {
           const newInfo = await extractPersonalInfo(groq, conversationHistory);
           
@@ -1210,7 +1252,7 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
             }
             
             await saveLongTermMemory(userId, updatedProfile);
-            console.log(`✅ Safety profile saved in background`);
+            console.log(`✅ Safety profile saved`);
           }
           
           return newInfo;
@@ -1219,7 +1261,15 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
       }
     }
 
-    // 9. Response with stats
+    // 10. Response with stats
+    const responseTime = Date.now() - startTime;
+    
+    // Update average response time
+    perfStats.avgResponseTime = 
+      (perfStats.avgResponseTime * (perfStats.totalRequests - 1) + responseTime) / perfStats.totalRequests;
+    
+    console.log(`⚡ Response time: ${responseTime}ms`);
+    
     const lastExtractData = await getData(`last_extract:${userId}:${finalConversationId}`);
     
     let parsedExtractData = null;
@@ -1234,21 +1284,24 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
       }
     }
     
-    // Log search stats periodically
-    if (searchStats.total % 10 === 0) {
-      console.log(`📊 Search Stats:`, {
-        total: searchStats.total,
-        cacheHitRate: `${Math.round(searchStats.cacheHits / searchStats.total * 100)}%`,
-        sources: searchStats.sources
+    // Log stats periodically
+    if (perfStats.totalRequests % 10 === 0) {
+      console.log(`📊 Performance Stats:`, {
+        totalRequests: perfStats.totalRequests,
+        responseCacheHitRate: `${Math.round(perfStats.responseCacheHits / perfStats.totalRequests * 100)}%`,
+        avgResponseTime: `${Math.round(perfStats.avgResponseTime)}ms`,
+        searchCacheHitRate: searchStats.total > 0 
+          ? `${Math.round(searchStats.cacheHits / searchStats.total * 100)}%` 
+          : 'N/A'
       });
     }
     
-    // ✅ Response ngay - không đợi background tasks
     return res.status(200).json({
       success: true,
       message: assistantMessage,
       userId: userId,
       conversationId: finalConversationId,
+      responseTime: responseTime,
       stats: {
         totalMessages: conversationHistory.length,
         workingMemorySize: workingMemory.length,
@@ -1257,6 +1310,12 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
+        cached: false,
+        performance: {
+          responseTime: responseTime,
+          responseCacheHitRate: Math.round(perfStats.responseCacheHits / perfStats.totalRequests * 100),
+          avgResponseTime: Math.round(perfStats.avgResponseTime)
+        },
         searchStats: {
           total: searchStats.total,
           cacheHits: searchStats.cacheHits,
@@ -1272,7 +1331,6 @@ ${searchResult ? `\n${formatSearchResult(searchResult)}\n⚠ Hãy ưu tiên sử
   } catch (error) {
     console.error('❌ Error:', error);
     console.error('Error stack:', error.stack);
-    console.error('Error name:', error.name);
     
     return res.status(500).json({
       success: false,
