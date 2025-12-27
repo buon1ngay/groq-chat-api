@@ -115,7 +115,7 @@ function normalizeForCache(message) {
     .substring(0, 100);
 }
 
-// ============ STORAGE HELPERS ============
+// === STORAGE HELPERS ===
 
 async function setData(key, value, ttl = null) {
   if (redis) {
@@ -172,7 +172,7 @@ async function setExpire(key, ttl) {
   return true;
 }
 
-// ============ UTILITY FUNCTIONS ============
+// === UTILITY FUNCTIONS ===
 
 function safeParseJSON(text, fallback = {}) {
   try {
@@ -203,7 +203,7 @@ async function retryWithBackoff(fn, maxRetries = 2) {
   }
 }
 
-// ============ SEARCH APIs ============
+// === SEARCH APIs ===
 
 // ✅ OPTIMIZATION #2: Generic search wrapper
 async function searchWithRetry(searchFn, name) {
@@ -300,9 +300,7 @@ const searchTavily = (query) => {
   }, 'Tavily');
 };
 
-// ============ SEARCH DETECTION ============
-
-// ✅ OPTIMIZATION #1 & #6: Simplified single detection function
+// === SEARCH DETECTION ===
 function quickDetect(message) {
   const lower = message.toLowerCase().trim();
   
@@ -403,7 +401,7 @@ async function shouldSearch(message, groq) {
   }
 }
 
-// ============ SMART SEARCH ============
+// === SMART SEARCH ===
 
 async function smartSearch(query, searchType) {
   const cacheKey = normalizeForCache(query);
@@ -452,7 +450,7 @@ async function smartSearch(query, searchType) {
   return null;
 }
 
-// ============ MEMORY FUNCTIONS ============
+// === MEMORY FUNCTIONS ===
 
 async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
@@ -548,6 +546,8 @@ async function extractPersonalInfo(groq, conversationHistory) {
           content: `Trích xuất thông tin cá nhân từ cuộc hội thoại (nếu có) theo format JSON:
 {
   "name": "tên người dùng",
+  "nickname": "tên thường gọi",
+  "family": "thông tin gia đình",
   "age": "tuổi",
   "job": "nghề nghiệp",
   "hobbies": "sở thích",
@@ -622,7 +622,7 @@ function mergeProfile(currentProfile, newInfo) {
   return updated;
 }
 
-// ============ API KEY MANAGEMENT ============
+// === API KEY MANAGEMENT ===
 
 function getRandomKeyIndex() {
   return Math.floor(Math.random() * API_KEYS.length);
@@ -730,7 +730,7 @@ async function callTempGroqWithRetry(userId, fn) {
   throw new Error('Đã thử hết tất cả API keys cho tempGroq');
 }
 
-// ============ MAIN HANDLER ============
+// === MAIN HANDLER ===
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -886,8 +886,7 @@ export default async function handler(req, res) {
 
     const systemPrompt = {
       role: 'system',
-      content: `Bạn là Kami, một AI thông minh và thân thiện được tạo ra bởi Nguyễn Đức Thạnh. Hãy trả lời bằng tiếng Việt tự nhiên.
-
+      content: `Bạn là Kami, một AI thông minh được tạo ra bởi Nguyễn Đức Thạnh. 
 📅 Ngày hiện tại: ${currentDate}
 ${Object.keys(userProfile).length > 0 ? `
 👤 THÔNG TIN NGƯỜI DÙNG:
@@ -899,7 +898,7 @@ ${searchResult ? `
 ${JSON.stringify(searchResult, null, 2)}
 ` : ''}
 
-Hãy trả lời câu hỏi của user một cách chính xác và tự nhiên. Có thể thêm tối đa 3 emoji phù hợp.`
+Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
     };
 
     const messages = [systemPrompt, ...workingMemory];
