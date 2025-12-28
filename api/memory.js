@@ -1,43 +1,26 @@
-import {
-  getLongTermMemory,
-  getSummary
-} from './_memory';
-
-export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ success: false });
-  }
-
+// GET /api/memory - Lấy bộ nhớ profile
+export async function getMemoryAPI(req, res) {
   try {
     const { userId, conversationId } = req.query;
-
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: 'userId required'
-      });
-    }
-
+    
     const finalConversationId = conversationId || 'default';
-
+    
     const [profile, summary] = await Promise.all([
       getLongTermMemory(userId),
       getSummary(userId, finalConversationId)
     ]);
-
+    
     return res.status(200).json({
       success: true,
-      profile,
-      summary,
-      profileFields: Object.keys(profile).length,
-      hasSummary: !!summary
+      profile: profile,
+      summary: summary,
+      profileCount: Object.keys(profile).length
     });
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      success: false,
-      error: err.message
+  } catch (error) {
+    console.error('Get memory error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message 
     });
   }
 }
