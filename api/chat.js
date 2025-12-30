@@ -797,11 +797,7 @@ export default async function handler(req, res) {
         responseTime: responseTime
       });
     }
-export {
-  getShortTermMemory,
-  saveShortTermMemory,
-  getLongTermMemory
-};
+
     // Load memory in parallel
     const [conversationHistory, userProfile] = await Promise.all([
       getShortTermMemory(userId, finalConversationId),
