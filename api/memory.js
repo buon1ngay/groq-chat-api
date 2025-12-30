@@ -1,31 +1,30 @@
-// pages/api/memory.js
+import { Redis } from '@upstash/redis';
 
-import { getLongTermMemory, getSummary } from '../../lib/memory'; 
-// ⬆️ sửa path nếu file lib của cậu chủ nằm chỗ khác
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_URL,
+  token: process.env.UPSTASH_REDIS_TOKEN
+});
 
 export default async function handler(req, res) {
-  try {
-    if (req.method !== 'GET') {
-      return res.status(405).json({
-        success: false,
-        error: 'Method not allowed'
-      });
-    }
+  if (req.method !== 'GET') {
+    return res.status(405).json({ success: false, error: 'Method not allowed' });
+  }
 
+  try {
     const { userId, conversationId } = req.query;
 
     if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing userId'
-      });
+      return res.status(400).json({ success: false, error: 'Missing userId' });
     }
 
     const finalConversationId = conversationId || 'default';
 
+    const profileKey = `user:profile:${userId}`;
+    const summaryKey = `summary:${userId}:${finalConversationId}`;
+
     const [profile, summary] = await Promise.all([
-      getLongTermMemory(userId),
-      getSummary(userId, finalConversationId)
+      redis.hgetall(profileKey),
+      redis.get(summaryKey)
     ]);
 
     return res.status(200).json({
@@ -36,10 +35,10 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('Get memory error:', error);
+    console.error('Memory API error:', error);
     return res.status(500).json({
       success: false,
-      error: error.message || 'Internal server error'
+      error: error.message
     });
   }
 }
