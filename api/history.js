@@ -1,5 +1,17 @@
-export async function getHistoryAPI(req, res) {
+// pages/api/history.js
+
+import { getShortTermMemory } from '../../lib/memory';
+// ⬆️ sửa path nếu lib nằm chỗ khác
+
+export default async function handler(req, res) {
   try {
+    if (req.method !== 'GET') {
+      return res.status(405).json({
+        success: false,
+        error: 'Method not allowed'
+      });
+    }
+
     const { userId, conversationId } = req.query;
 
     if (!userId) {
@@ -10,6 +22,7 @@ export async function getHistoryAPI(req, res) {
     }
 
     const finalConversationId = conversationId || 'default';
+
     const history = await getShortTermMemory(userId, finalConversationId);
     const safeHistory = Array.isArray(history) ? history : [];
 
@@ -17,11 +30,12 @@ export async function getHistoryAPI(req, res) {
       success: true,
       history: safeHistory.map((msg, index) => ({
         id: `${finalConversationId}_${index}`,
-        role: msg.role,
-        content: msg.content
+        role: msg.role || 'assistant',
+        content: msg.content || ''
       })),
       total: safeHistory.length
     });
+
   } catch (error) {
     console.error('Get history error:', {
       userId: req.query?.userId,
@@ -31,7 +45,7 @@ export async function getHistoryAPI(req, res) {
 
     return res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: error.message || 'Internal server error'
     });
   }
 }
