@@ -452,7 +452,7 @@ async function smartSearch(query, searchType) {
 
 // === MEMORY FUNCTIONS ===
 
-export async function getShortTermMemory(userId, conversationId) {
+async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
   const history = await getData(key);
   
@@ -480,7 +480,7 @@ async function saveShortTermMemory(userId, conversationId, history) {
   await setData(key, data, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
 }
 
-export async function getLongTermMemory(userId) {
+async function getLongTermMemory(userId) {
   const key = `user:profile:${userId}`;
   const profile = await getHashData(key);
   
@@ -496,7 +496,7 @@ async function saveLongTermMemory(userId, profileData) {
   await setHashData(key, profileData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
 }
 
-export async function getSummary(userId, conversationId) {
+async function getSummary(userId, conversationId) {
   const key = `summary:${userId}:${conversationId}`;
   const summary = await getData(key);
   
@@ -814,8 +814,6 @@ export async function getMemoryHandler(req, res) {
     });
   }
 }
-
-// === MAIN CHAT HANDLER ===
 // === MAIN HANDLER ===
 
 export default async function handler(req, res) {
