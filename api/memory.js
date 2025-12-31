@@ -1,44 +1,45 @@
-import { Redis } from '@upstash/redis';
-
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_URL,
-  token: process.env.UPSTASH_REDIS_TOKEN
-});
+import { getLongTermMemory, getSummary } from '../chat.js';
 
 export default async function handler(req, res) {
+  // Chỉ chấp nhận GET
   if (req.method !== 'GET') {
-    return res.status(405).json({ success: false, error: 'Method not allowed' });
+    return res.status(405).json({ 
+      success: false, 
+      error: 'Method not allowed' 
+    });
   }
 
   try {
     const { userId, conversationId } = req.query;
-
-    if (!userId) {
-      return res.status(400).json({ success: false, error: 'Missing userId' });
+    
+    // Validate
+    if (!userId || !userId.startsWith('user_')) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid userId format' 
+      });
     }
-
+    
     const finalConversationId = conversationId || 'default';
-
-    const profileKey = `user:profile:${userId}`;
-    const summaryKey = `summary:${userId}:${finalConversationId}`;
-
+    
+    // Lấy profile và summary
     const [profile, summary] = await Promise.all([
-      redis.hgetall(profileKey),
-      redis.get(summaryKey)
+      getLongTermMemory(userId),
+      getSummary(userId, finalConversationId)
     ]);
-
+    
     return res.status(200).json({
       success: true,
-      profile: profile || {},
-      summary: summary || '',
-      profileCount: profile ? Object.keys(profile).length : 0
+      profile: profile,
+      summary: summary,
+      profileCount: Object.keys(profile).length
     });
-
+    
   } catch (error) {
-    console.error('Memory API error:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message
+    console.error('❌ Get memory error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Internal server error' 
     });
   }
 }
