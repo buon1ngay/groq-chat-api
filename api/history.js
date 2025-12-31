@@ -1,56 +1,49 @@
-// api/history.js
-
-// ⚠️ IMPORT TRỰC TIẾP TỪ chat.js
-// vì toàn bộ memory logic đang nằm ở đó
-import {
-  getShortTermMemory
-} from './chat';
+import { getShortTermMemory } from '../chat.js';
 
 export default async function handler(req, res) {
+  // Chỉ chấp nhận GET
   if (req.method !== 'GET') {
-    return res.status(405).json({
-      success: false,
-      error: 'Method not allowed'
+    return res.status(405).json({ 
+      success: false, 
+      error: 'Method not allowed' 
     });
   }
 
   try {
     const { userId, conversationId } = req.query;
-
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing userId'
+    
+    // Validate
+    if (!userId || !userId.startsWith('user_')) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid userId format' 
       });
     }
-
+    
     const finalConversationId = conversationId || 'default';
-
-    const history = await getShortTermMemory(
-      userId,
-      finalConversationId
-    );
-
-    const safeHistory = Array.isArray(history) ? history : [];
-
+    
+    // Lấy lịch sử từ Redis/Memory
+    const history = await getShortTermMemory(userId, finalConversationId);
+    
+    // Format response
+    const formattedHistory = history.map((msg, index) => ({
+      id: index,
+      role: msg.role,
+      content: msg.content,
+      isUser: msg.role === 'user'
+    }));
+    
     return res.status(200).json({
       success: true,
-      userId,
-      conversationId: finalConversationId,
-      total: safeHistory.length,
-      history: safeHistory.map((msg, index) => ({
-        id: `${finalConversationId}_${index}`,
-        role: msg.role,
-        content: msg.content
-      }))
+      history: formattedHistory,
+      total: formattedHistory.length
     });
-
+    
   } catch (error) {
-    console.error('❌ HISTORY ERROR:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error'
+    console.error('❌ Get history error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Internal server error' 
     });
   }
 }
