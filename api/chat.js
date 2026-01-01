@@ -741,35 +741,8 @@ export default async function handler(req, res) {
 
   try {
     const { message, userId, conversationId } = req.body;
-const finalConversationId = conversationId || 'chat001';
-const cmd = message.trim().toLowerCase();
 
-/* ================= COMMAND HANDLER ================= */
-
-if (cmd === '/history') {
-  const history = await getShortTermMemory(userId, finalConversationId);
-
-  return res.status(200).json({
-    success: true,
-    type: 'history',
-    data: history,
-    userId,
-    conversationId: finalConversationId
-  });
-}
-
-if (cmd === '/memory') {
-  const memory = await getLongTermMemory(userId);
-
-  return res.status(200).json({
-    success: true,
-    type: 'memory',
-    data: memory,
-    userId
-  });
-}
-
-/* ================= END COMMAND ================= */    if (!message || typeof message !== 'string' || message.trim() === '') {
+    if (!message || typeof message !== 'string' || message.trim() === '') {
       return res.status(400).json({ 
         success: false,
         error: 'Message is required and cannot be empty' 
@@ -784,8 +757,34 @@ if (cmd === '/memory') {
     }
 
     const finalConversationId = conversationId || 'default';
+const cmd = message.trim().toLowerCase();
 
-    if (API_KEYS.length === 0) {
+/* ===== COMMAND MODE (SAFE) ===== */
+
+if (cmd === '/history') {
+  const history = await getShortTermMemory(userId, finalConversationId);
+
+  return res.status(200).json({
+    success: true,
+    mode: 'history',
+    data: history,
+    userId,
+    conversationId: finalConversationId
+  });
+}
+
+if (cmd === '/memory') {
+  const memory = await getLongTermMemory(userId);
+
+  return res.status(200).json({
+    success: true,
+    mode: 'memory',
+    data: memory,
+    userId
+  });
+}
+
+/* ===== END COMMAND MODE ===== */    if (API_KEYS.length === 0) {
       return res.status(500).json({ 
         success: false,
         error: 'No API keys configured' 
