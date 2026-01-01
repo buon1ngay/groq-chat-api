@@ -452,7 +452,7 @@ async function smartSearch(query, searchType) {
 
 // === MEMORY FUNCTIONS ===
 
-export async function getShortTermMemory(userId, conversationId) {
+async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
   const history = await getData(key);
   
@@ -480,7 +480,7 @@ async function saveShortTermMemory(userId, conversationId, history) {
   await setData(key, data, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
 }
 
-export async function getLongTermMemory(userId) {
+async function getLongTermMemory(userId) {
   const key = `user:profile:${userId}`;
   const profile = await getHashData(key);
   
@@ -496,7 +496,7 @@ async function saveLongTermMemory(userId, profileData) {
   await setHashData(key, profileData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
 }
 
-export async function getSummary(userId, conversationId) {
+async function getSummary(userId, conversationId) {
   const key = `summary:${userId}:${conversationId}`;
   const summary = await getData(key);
   
@@ -729,94 +729,89 @@ async function callTempGroqWithRetry(userId, fn) {
 
   throw new Error('Đã thử hết tất cả API keys cho tempGroq');
 }
-// === API ENDPOINTS FOR MOBILE APP ===
-
-export async function getHistoryHandler(req, res) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ 
-      success: false, 
-      error: 'Method not allowed' 
-    });
-  }
-
-  try {
-    const { userId, conversationId } = req.query;
-    
-    if (!userId || !userId.startsWith('user_')) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Invalid userId format' 
-      });
-    }
-    
-    const finalConversationId = conversationId || 'default';
-    const history = await getShortTermMemory(userId, finalConversationId);
-    
-    const formattedHistory = history.map((msg, index) => ({
-      id: index,
-      role: msg.role,
-      content: msg.content,
-      isUser: msg.role === 'user'
-    }));
-    
-    return res.status(200).json({
-      success: true,
-      history: formattedHistory,
-      total: formattedHistory.length
-    });
-    
-  } catch (error) {
-    console.error('❌ Get history error:', error);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message || 'Internal server error' 
-    });
-  }
-}
-
-export async function getMemoryHandler(req, res) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ 
-      success: false, 
-      error: 'Method not allowed' 
-    });
-  }
-
-  try {
-    const { userId, conversationId } = req.query;
-    
-    if (!userId || !userId.startsWith('user_')) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Invalid userId format' 
-      });
-    }
-    
-    const finalConversationId = conversationId || 'default';
-    
-    const [profile, summary] = await Promise.all([
-      getLongTermMemory(userId),
-      getSummary(userId, finalConversationId)
-    ]);
-    
-    return res.status(200).json({
-      success: true,
-      profile: profile,
-      summary: summary,
-      profileCount: Object.keys(profile).length
-    });
-    
-  } catch (error) {
-    console.error('❌ Get memory error:', error);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message || 'Internal server error' 
-    });
-  }
-}
-// === MAIN HANDLER ===
+// === MAIN HANDLER WITH ROUTING ===
 
 export default async function handler(req, res) {
+  // === ROUTING FOR GET REQUESTS ===
+  if (req.method === 'GET') {
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const pathname = url.pathname;
+    const { userId, conversationId } = Object.fromEntries(url.searchParams);
+    
+    // History endpoint
+    if (pathname === '/api/history') {
+      try {
+        if (!userId || !userId.startsWith('user_')) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'Invalid userId format' 
+          });
+        }
+        
+        const finalConversationId = conversationId || 'default';
+        const history = await getShortTermMemory(userId, finalConversationId);
+        
+        const formattedHistory = history.map((msg, index) => ({
+          id: index,
+          role: msg.role,
+          content: msg.content,
+          isUser: msg.role === 'user'
+        }));
+        
+        return res.status(200).json({
+          success: true,
+          history: formattedHistory,
+          total: formattedHistory.length
+        });
+      } catch (error) {
+        console.error('❌ Get history error:', error);
+        return res.status(500).json({ 
+          success: false, 
+          error: error.message || 'Internal server error' 
+        });
+      }
+    }
+    
+    // Memory endpoint
+    if (pathname === '/api/memory') {
+      try {
+        if (!userId || !userId.startsWith('user_')) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'Invalid userId format' 
+          });
+        }
+        
+        const finalConversationId = conversationId || 'default';
+        
+        const [profile, summary] = await Promise.all([
+          getLongTermMemory(userId),
+          getSummary(userId, finalConversationId)
+        ]);
+        
+        return res.status(200).json({
+          success: true,
+          profile: profile,
+          summary: summary,
+          profileCount: Object.keys(profile).length
+        });
+      } catch (error) {
+        console.error('❌ Get memory error:', error);
+        return res.status(500).json({ 
+          success: false, 
+          error: error.message || 'Internal server error' 
+        });
+      }
+    }
+    
+    // Unknown GET endpoint
+    return res.status(404).json({ 
+      success: false, 
+      error: 'Endpoint not found' 
+    });
+  }
+  
+  // === MAIN CHAT HANDLER (POST) ===
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
