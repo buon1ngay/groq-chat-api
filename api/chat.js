@@ -729,89 +729,10 @@ async function callTempGroqWithRetry(userId, fn) {
 
   throw new Error('Đã thử hết tất cả API keys cho tempGroq');
 }
-// === MAIN HANDLER WITH ROUTING ===
+
+// === MAIN HANDLER ===
 
 export default async function handler(req, res) {
-  // === ROUTING FOR GET REQUESTS ===
-  if (req.method === 'GET') {
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const pathname = url.pathname;
-    const { userId, conversationId } = Object.fromEntries(url.searchParams);
-    
-    // History endpoint
-    if (pathname === '/api/history') {
-      try {
-        if (!userId || !userId.startsWith('user_')) {
-          return res.status(400).json({ 
-            success: false, 
-            error: 'Invalid userId format' 
-          });
-        }
-        
-        const finalConversationId = conversationId || 'default';
-        const history = await getShortTermMemory(userId, finalConversationId);
-        
-        const formattedHistory = history.map((msg, index) => ({
-          id: index,
-          role: msg.role,
-          content: msg.content,
-          isUser: msg.role === 'user'
-        }));
-        
-        return res.status(200).json({
-          success: true,
-          history: formattedHistory,
-          total: formattedHistory.length
-        });
-      } catch (error) {
-        console.error('❌ Get history error:', error);
-        return res.status(500).json({ 
-          success: false, 
-          error: error.message || 'Internal server error' 
-        });
-      }
-    }
-    
-    // Memory endpoint
-    if (pathname === '/api/memory') {
-      try {
-        if (!userId || !userId.startsWith('user_')) {
-          return res.status(400).json({ 
-            success: false, 
-            error: 'Invalid userId format' 
-          });
-        }
-        
-        const finalConversationId = conversationId || 'default';
-        
-        const [profile, summary] = await Promise.all([
-          getLongTermMemory(userId),
-          getSummary(userId, finalConversationId)
-        ]);
-        
-        return res.status(200).json({
-          success: true,
-          profile: profile,
-          summary: summary,
-          profileCount: Object.keys(profile).length
-        });
-      } catch (error) {
-        console.error('❌ Get memory error:', error);
-        return res.status(500).json({ 
-          success: false, 
-          error: error.message || 'Internal server error' 
-        });
-      }
-    }
-    
-    // Unknown GET endpoint
-    return res.status(404).json({ 
-      success: false, 
-      error: 'Endpoint not found' 
-    });
-  }
-  
-  // === MAIN CHAT HANDLER (POST) ===
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -820,7 +741,39 @@ export default async function handler(req, res) {
 
   try {
     const { message, userId, conversationId } = req.body;
+// ===== MENU COMMANDS (/history, /memory) =====
+const cmd = message.trim().toLowerCase();
+const finalConversationId = conversationId || 'default';
 
+// 📜 LỊCH SỬ CHAT
+if (cmd === '/history') {
+  const history = await getShortTermMemory(userId, finalConversationId);
+
+  return res.status(200).json({
+    success: true,
+    type: 'history',
+    userId,
+    conversationId: finalConversationId,
+    data: history
+  });
+}
+
+// 🧠 BỘ NHỚ AI (PROFILE + SUMMARY)
+if (cmd === '/memory') {
+  const [profile, summary] = await Promise.all([
+    getLongTermMemory(userId),
+    getSummary(userId, finalConversationId)
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    type: 'memory',
+    userId,
+    conversationId: finalConversationId,
+    profile: profile || {},
+    summary: summary || ''
+  });
+}
     if (!message || typeof message !== 'string' || message.trim() === '') {
       return res.status(400).json({ 
         success: false,
