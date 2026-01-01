@@ -741,40 +741,35 @@ export default async function handler(req, res) {
 
   try {
     const { message, userId, conversationId } = req.body;
-// ===== MENU COMMANDS (/history, /memory) =====
+const finalConversationId = conversationId || 'chat001';
 const cmd = message.trim().toLowerCase();
-const finalConversationId = conversationId || 'default';
 
-// 📜 LỊCH SỬ CHAT
+/* ================= COMMAND HANDLER ================= */
+
 if (cmd === '/history') {
   const history = await getShortTermMemory(userId, finalConversationId);
 
   return res.status(200).json({
     success: true,
     type: 'history',
+    data: history,
     userId,
-    conversationId: finalConversationId,
-    data: history
+    conversationId: finalConversationId
   });
 }
 
-// 🧠 BỘ NHỚ AI (PROFILE + SUMMARY)
 if (cmd === '/memory') {
-  const [profile, summary] = await Promise.all([
-    getLongTermMemory(userId),
-    getSummary(userId, finalConversationId)
-  ]);
+  const memory = await getLongTermMemory(userId);
 
   return res.status(200).json({
     success: true,
     type: 'memory',
-    userId,
-    conversationId: finalConversationId,
-    profile: profile || {},
-    summary: summary || ''
+    data: memory,
+    userId
   });
 }
-    if (!message || typeof message !== 'string' || message.trim() === '') {
+
+/* ================= END COMMAND ================= */    if (!message || typeof message !== 'string' || message.trim() === '') {
       return res.status(400).json({ 
         success: false,
         error: 'Message is required and cannot be empty' 
