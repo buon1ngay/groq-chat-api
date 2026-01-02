@@ -770,18 +770,18 @@ if (message === '/history') {
     });
   }
 
-  let historyText = "🕘 **LỊCH SỬ CHAT**\n\n";
-  const recentMessages = conversationHistory.slice(-20);
+  let historyText = "🕘 LỊCH SỬ CHAT\n\n";
+  const recentMessages = conversationHistory.slice(-30);
   
   recentMessages.forEach((msg) => {
     if (msg.role === 'user') {
-      historyText += `👤 **Bạn:** ${msg.content}\n\n`;
+      historyText += `👤 Bạn: ${msg.content}\n\n`;
     } else if (msg.role === 'assistant') {
-      historyText += `🤖 **Kami:** ${msg.content}\n\n`;
+      historyText += `🤖 Kami: ${msg.content}\n\n`;
     }
   });
 
-  historyText += `\n📊 Tổng cộng: ${conversationHistory.length} tin nhắn`;
+  historyText += `\n📊 Tổng cộng: 30 tin cuối/${conversationHistory.length} tin nhắn`;
 
   return res.status(200).json({
     success: true,
@@ -795,12 +795,12 @@ if (message === '/memory') {
   const userProfile = await getLongTermMemory(userId);
   const summary = await getSummary(userId, finalConversationId);
 
-  let memoryText = "🧠 **BỘ NHỚ AI**\n\n";
+  let memoryText = "🧠 BỘ NHỚ AI\n\n";
 
   if (Object.keys(userProfile).length === 0) {
     memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
   } else {
-    memoryText += "👤 **THÔNG TIN CÁ NHÂN:**\n";
+    memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
     for (const [key, value] of Object.entries(userProfile)) {
       const displayKey = key.charAt(0).toUpperCase() + key.slice(1);
       memoryText += `▪️ ${displayKey}: ${value}\n`;
@@ -809,7 +809,7 @@ if (message === '/memory') {
   }
 
   if (summary) {
-    memoryText += "📝 **TÓM TẮT HỘI THOẠI:**\n";
+    memoryText += "📝 TÓM TẮT HỘI THOẠI:\n";
     memoryText += summary;
   }
 
