@@ -88,14 +88,25 @@ const MEMORY_CONFIG = {
   SUMMARY_THRESHOLD: 40
 };
 
-// ✅ OPTIMIZATION #1: Pre-compiled detection patterns
+// ✅ FIXED: Detection patterns - Tighter rules
 const DETECTION_PATTERNS = {
-  never: /^(chào|hello|hi|xin chào|hey|cảm ơn|thank|thanks|tạm biệt|bye|goodbye|ok|okay|được|rồi|ừ|uhm)$/i,
-  explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp)/i,
-  realtime: /(giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay)/i,
-  current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang|ai là|là ai)/i,
-  concept: /^.*(là gì|nghĩa là gì|định nghĩa|ý nghĩa|giải thích|cho.*biết về|nói về)/i,
-  advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i
+  // Chỉ skip những greeting thực sự đơn giản
+  never: /^(chào|hello|hi|xin chào|hey|ok|okay|được|rồi|ừ|uhm|à|ừm)$/i,
+  
+  // Explicit search - mở rộng thêm
+  explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp|cho tôi biết|hãy tìm)/i,
+  
+  // Real-time data - cần search ngay
+  realtime: /(giá bitcoin|giá vàng|giá dầu|giá cổ phiếu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay|breaking news)/i,
+  
+  // Current state - người, vị trí, sự kiện hiện tại
+  current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|năm \d{4}|mới nhất|gần đây|vừa rồi|đang|ai là|là ai|tổng thống|thủ tướng|ceo|giám đốc)/i,
+  
+  // Facts that need verification
+  factual: /(khi nào|bao giờ|năm nào|ngày nào|ở đâu|tại đâu|bao nhiêu|có bao nhiêu|cao bao nhiêu|dài bao nhiêu|diện tích)/i,
+  
+  // Advice - AI CÓ THỂ trả lời
+  advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào để|bạn nghĩ|theo bạn|ý kiến|gợi ý)/i
 };
 
 // ✅ OPTIMIZATION #5: Conditional stats (only in dev)
@@ -243,6 +254,36 @@ const searchWikipedia = (query) => searchWithRetry(async () => {
   };
 }, 'Wikipedia');
 
+// ✅ NEW: English Wikipedia fallback
+const searchWikipediaEN = (query) => searchWithRetry(async () => {
+  const searchUrl = 'https://en.wikipedia.org/w/api.php';
+  const searchResponse = await axios.get(searchUrl, {
+    params: {
+      action: 'opensearch',
+      search: query,
+      limit: 3,
+      format: 'json'
+    },
+    timeout: 4000
+  });
+
+  const titles = searchResponse.data[1];
+  if (!titles || titles.length === 0) return null;
+
+  const pageTitle = titles[0];
+  const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pageTitle)}`;
+  const summaryResponse = await axios.get(summaryUrl, { timeout: 4000 });
+  const data = summaryResponse.data;
+  
+  return {
+    source: 'Wikipedia (EN)',
+    title: data.title,
+    content: data.extract,
+    url: data.content_urls.desktop.page
+  };
+}, 'Wikipedia EN');
+
+// ✅ FIXED: Improved Serper with better formatting
 const searchSerper = (query) => {
   if (!SERPER_API_KEY) return null;
   return searchWithRetry(async () => {
@@ -250,26 +291,61 @@ const searchSerper = (query) => {
       q: query,
       gl: 'vn',
       hl: 'vi',
-      num: 3
+      num: 5
     }, {
       headers: {
         'X-API-KEY': SERPER_API_KEY,
         'Content-Type': 'application/json'
       },
-      timeout: 4000
+      timeout: 5000
     });
 
-    const results = response.data.organic || [];
-    if (results.length === 0) return null;
+    const organic = response.data.organic || [];
+    const knowledgeGraph = response.data.knowledgeGraph;
+    const answerBox = response.data.answerBox;
 
-    return {
-      source: 'Serper',
-      results: results.map(r => ({
-        title: r.title,
-        content: r.snippet,
-        url: r.link
-      }))
-    };
+    // Priority 1: Answer box
+    if (answerBox?.answer || answerBox?.snippet) {
+      return {
+        source: 'Serper',
+        answer: answerBox.answer || answerBox.snippet,
+        title: answerBox.title,
+        results: organic.slice(0, 3).map(r => ({
+          title: r.title,
+          content: r.snippet,
+          url: r.link
+        }))
+      };
+    }
+
+    // Priority 2: Knowledge graph
+    if (knowledgeGraph) {
+      return {
+        source: 'Serper',
+        title: knowledgeGraph.title,
+        content: knowledgeGraph.description,
+        attributes: knowledgeGraph.attributes,
+        results: organic.slice(0, 3).map(r => ({
+          title: r.title,
+          content: r.snippet,
+          url: r.link
+        }))
+      };
+    }
+
+    // Priority 3: Organic results
+    if (organic.length > 0) {
+      return {
+        source: 'Serper',
+        results: organic.slice(0, 5).map(r => ({
+          title: r.title,
+          content: r.snippet,
+          url: r.link
+        }))
+      };
+    }
+
+    return null;
   }, 'Serper');
 };
 
@@ -301,43 +377,57 @@ const searchTavily = (query) => {
 };
 
 // === SEARCH DETECTION ===
+// ✅ FIXED: Smarter detection
 function quickDetect(message) {
   const lower = message.toLowerCase().trim();
+  const length = lower.length;
   
-  // Never search - casual conversation
-  if (DETECTION_PATTERNS.never.test(lower)) {
-    return { needsSearch: false, confidence: 1.0, reason: 'casual' };
+  // 1. Never search - chỉ với greeting thực sự ngắn
+  if (length < 15 && DETECTION_PATTERNS.never.test(lower)) {
+    return { needsSearch: false, confidence: 1.0, reason: 'greeting' };
   }
   
-  // Explicit search commands
+  // 2. Explicit search - luôn search
   if (DETECTION_PATTERNS.explicit.test(lower)) {
     return { needsSearch: true, confidence: 1.0, type: 'search' };
   }
   
-  // Real-time data
+  // 3. Real-time data - PHẢI search
   if (DETECTION_PATTERNS.realtime.test(lower)) {
     return { needsSearch: true, confidence: 1.0, type: 'realtime' };
   }
   
-  // Current events/people
+  // 4. Current events/people - PHẢI search
   if (DETECTION_PATTERNS.current.test(lower)) {
+    return { needsSearch: true, confidence: 0.95, type: 'knowledge' };
+  }
+  
+  // 5. Factual questions - NÊN search
+  if (DETECTION_PATTERNS.factual.test(lower)) {
     return { needsSearch: true, confidence: 0.9, type: 'knowledge' };
   }
   
-  // Concept questions - AI can answer
-  if (DETECTION_PATTERNS.concept.test(lower)) {
-    const commonTopics = /(python|javascript|lập trình|code|toán|vật lý|hóa|sinh|văn|nghệ thuật)/i;
-    if (commonTopics.test(lower)) {
-      return { needsSearch: false, confidence: 0.9 };
-    }
+  // 6. Proper nouns (tên riêng) - có thể cần search
+  if (/[A-Z][a-z]+/.test(message)) {
+    return { needsSearch: true, confidence: 0.8, type: 'knowledge' };
   }
   
-  // Advice/opinion - AI can answer
+  // 7. Questions (có dấu hỏi) - xu hướng search
+  if (lower.includes('?')) {
+    return { needsSearch: true, confidence: 0.7, type: 'knowledge' };
+  }
+  
+  // 8. Advice - AI trả lời được
   if (DETECTION_PATTERNS.advice.test(lower)) {
-    return { needsSearch: false, confidence: 0.85 };
+    return { needsSearch: false, confidence: 0.9, reason: 'advice' };
   }
   
-  // Default: uncertain
+  // 9. Default: câu dài thì nên search
+  if (length > 30) {
+    return { needsSearch: true, confidence: 0.6, type: 'knowledge' };
+  }
+  
+  // 10. Uncertain
   return { needsSearch: false, confidence: 0.5 };
 }
 
@@ -402,7 +492,7 @@ async function shouldSearch(message, groq) {
 }
 
 // === SMART SEARCH ===
-
+// ✅ FIXED: Smarter search với fallback chain
 async function smartSearch(query, searchType) {
   const cacheKey = normalizeForCache(query);
   
@@ -412,41 +502,66 @@ async function smartSearch(query, searchType) {
     return cached;
   }
 
-  console.log(`🔍 Search type: ${searchType}`);
+  console.log(`🔍 Search type: ${searchType}, Query: "${query}"`);
 
   let result = null;
+  const searches = [];
 
-  if (searchType === 'realtime' && SERPER_API_KEY) {
-    result = await searchSerper(query);
-    if (result) {
-      searchCache.set(cacheKey, result);
-      return result;
+  // Strategy 1: Real-time data → Serper first
+  if (searchType === 'realtime') {
+    if (SERPER_API_KEY) {
+      console.log(`🔥 Trying Serper (realtime)...`);
+      result = await searchSerper(query);
+      if (result) {
+        searchCache.set(cacheKey, result);
+        return result;
+      }
+    }
+    
+    // Fallback: Tavily
+    if (TAVILY_API_KEY) {
+      console.log(`🔄 Fallback to Tavily...`);
+      result = await searchTavily(query);
+      if (result) {
+        searchCache.set(cacheKey, result);
+        return result;
+      }
     }
   }
 
-  if (searchType === 'knowledge') {
-    const searches = [
-      searchWikipedia(query),
-      TAVILY_API_KEY ? searchTavily(query) : null
-    ].filter(Boolean);
+  // Strategy 2: Knowledge questions → Try all sources
+  if (searchType === 'knowledge' || searchType === 'search') {
+    // Parallel search: Wikipedia + Tavily + Serper
+    if (TAVILY_API_KEY) searches.push(searchTavily(query));
+    if (SERPER_API_KEY) searches.push(searchSerper(query));
+    searches.push(searchWikipedia(query));
+    
+    console.log(`🔍 Trying ${searches.length} sources in parallel...`);
     
     const results = await Promise.allSettled(searches);
-    result = results.find(r => r.status === 'fulfilled' && r.value)?.value;
     
+    // Pick first successful result
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) {
+        result = r.value;
+        console.log(`✅ Got result from ${result.source}`);
+        searchCache.set(cacheKey, result);
+        return result;
+      }
+    }
+  }
+
+  // Strategy 3: Final fallback - Try English Wikipedia
+  if (!result) {
+    console.log(`🌍 Trying English Wikipedia...`);
+    result = await searchWikipediaEN(query);
     if (result) {
       searchCache.set(cacheKey, result);
       return result;
     }
   }
 
-  console.log(`🔄 Fallback to Wikipedia`);
-  result = await searchWikipedia(query);
-  
-  if (result) {
-    searchCache.set(cacheKey, result);
-    return result;
-  }
-
+  console.log(`❌ All search sources failed`);
   return null;
 }
 
@@ -757,69 +872,71 @@ export default async function handler(req, res) {
     }
 
     const finalConversationId = conversationId || 'default';
-// ✅ XỬ LÝ COMMANDS
-if (message === '/history') {
-  const conversationHistory = await getShortTermMemory(userId, finalConversationId);
-  
-  if (conversationHistory.length === 0) {
-    return res.status(200).json({
-      success: true,
-      message: "📭 Chưa có lịch sử chat nào.",
-      userId: userId,
-      conversationId: finalConversationId
-    });
-  }
 
-  let historyText = "🕘 LỊCH SỬ CHAT\n\n";
-  const recentMessages = conversationHistory.slice(-30);
-  
-  recentMessages.forEach((msg) => {
-    if (msg.role === 'user') {
-      historyText += `👤 Bạn: ${msg.content}\n\n`;
-    } else if (msg.role === 'assistant') {
-      historyText += `🤖 Kami: ${msg.content}\n\n`;
+    // ✅ XỬ LÝ COMMANDS
+    if (message === '/history') {
+      const conversationHistory = await getShortTermMemory(userId, finalConversationId);
+      
+      if (conversationHistory.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: "📭 Chưa có lịch sử chat nào.",
+          userId: userId,
+          conversationId: finalConversationId
+        });
+      }
+
+      let historyText = "🕘 LỊCH SỬ CHAT\n\n";
+      const recentMessages = conversationHistory.slice(-30);
+      
+      recentMessages.forEach((msg) => {
+        if (msg.role === 'user') {
+          historyText += `👤 Bạn: ${msg.content}\n\n`;
+        } else if (msg.role === 'assistant') {
+          historyText += `🤖 Kami: ${msg.content}\n\n`;
+        }
+      });
+
+      historyText += `\n📊 Tổng cộng: 30 tin cuối/${conversationHistory.length} tin nhắn`;
+
+      return res.status(200).json({
+        success: true,
+        message: historyText,
+        userId: userId,
+        conversationId: finalConversationId
+      });
     }
-  });
 
-  historyText += `\n📊 Tổng cộng: 30 tin cuối/${conversationHistory.length} tin nhắn`;
+    if (message === '/memory') {
+      const userProfile = await getLongTermMemory(userId);
+      const summary = await getSummary(userId, finalConversationId);
 
-  return res.status(200).json({
-    success: true,
-    message: historyText,
-    userId: userId,
-    conversationId: finalConversationId
-  });
-}
+      let memoryText = "🧠 BỘ NHỚ AI\n\n";
 
-if (message === '/memory') {
-  const userProfile = await getLongTermMemory(userId);
-  const summary = await getSummary(userId, finalConversationId);
+      if (Object.keys(userProfile).length === 0) {
+        memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
+      } else {
+        memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
+        for (const [key, value] of Object.entries(userProfile)) {
+          const displayKey = key.charAt(0).toUpperCase() + key.slice(1);
+          memoryText += `▪️ ${displayKey}: ${value}\n`;
+        }
+        memoryText += "\n";
+      }
 
-  let memoryText = "🧠 BỘ NHỚ AI\n\n";
+      if (summary) {
+        memoryText += "📝 TÓM TẮT HỘI THOẠI:\n";
+        memoryText += summary;
+      }
 
-  if (Object.keys(userProfile).length === 0) {
-    memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
-  } else {
-    memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
-    for (const [key, value] of Object.entries(userProfile)) {
-      const displayKey = key.charAt(0).toUpperCase() + key.slice(1);
-      memoryText += `▪️ ${displayKey}: ${value}\n`;
+      return res.status(200).json({
+        success: true,
+        message: memoryText,
+        userId: userId,
+        conversationId: finalConversationId
+      });
     }
-    memoryText += "\n";
-  }
 
-  if (summary) {
-    memoryText += "📝 TÓM TẮT HỘI THOẠI:\n";
-    memoryText += summary;
-  }
-
-  return res.status(200).json({
-    success: true,
-    message: memoryText,
-    userId: userId,
-    conversationId: finalConversationId
-  });
-}
     if (API_KEYS.length === 0) {
       return res.status(500).json({ 
         success: false,
@@ -880,7 +997,7 @@ if (message === '/memory') {
       console.log(`💾 Using cached search decision`);
     } else {
       searchDecision = quickDetect(message);
-      console.log(`⚡ Quick detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'}`);
+      console.log(`🎯 Detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'} (${searchDecision.confidence}) - ${searchDecision.type || searchDecision.reason}`);
       
       if (searchDecision.confidence >= 0.8) {
         detectionCache.set(searchCacheKey, searchDecision);
@@ -891,7 +1008,11 @@ if (message === '/memory') {
       searchResult = await smartSearch(message, searchDecision.type);
       
       if (searchResult) {
-        console.log(`✅ Search successful: ${searchResult.source}`);
+        console.log(`✅ Search result from ${searchResult.source}:`, {
+          hasAnswer: !!searchResult.answer,
+          hasContent: !!searchResult.content,
+          resultsCount: searchResult.results?.length || 0
+        });
       }
     }
 
@@ -950,17 +1071,29 @@ if (message === '/memory') {
       role: 'system',
       content: `Bạn là Kami, một AI thông minh được tạo ra bởi Nguyễn Đức Thạnh. 
 📅 Ngày hiện tại: ${currentDate}
-${Object.keys(userProfile).length > 0 ? `
-👤 THÔNG TIN NGƯỜI DÙNG:
+
+${Object.keys(userProfile).length > 0 ? `👤 THÔNG TIN NGƯỜI DÙNG:
 ${Object.entries(userProfile).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
 ` : ''}
+
 ${existingSummary ? `📝 TÓM TẮT TRƯỚC:\n${existingSummary}\n` : ''}
-${searchResult ? `
-🔍 KẾT QUẢ TÌM KIẾM (dùng thông tin này để trả lời):
-${JSON.stringify(searchResult, null, 2)}
+
+${searchResult ? `🔍 KẾT QUẢ TÌM KIẾM MỚI NHẤT:
+Nguồn: ${searchResult.source}
+${searchResult.answer ? `Câu trả lời trực tiếp: ${searchResult.answer}\n` : ''}
+${searchResult.title ? `Tiêu đề: ${searchResult.title}\n` : ''}
+${searchResult.content ? `Nội dung: ${searchResult.content}\n` : ''}
+${searchResult.attributes ? `Thông tin: ${JSON.stringify(searchResult.attributes)}\n` : ''}
+${searchResult.results ? `Chi tiết:\n${searchResult.results.map((r, i) => `${i+1}. ${r.title}\n   ${r.content}\n   ${r.url}`).join('\n\n')}` : ''}
+
+⚠️ QUAN TRỌNG: 
+- Sử dụng thông tin tìm kiếm ở trên để trả lời
+- Nếu thông tin tìm kiếm liên quan trực tiếp đến câu hỏi, ưu tiên dùng nó
+- Trích dẫn nguồn khi cần: "Theo ${searchResult.source}..."
+- Nếu thông tin không đủ, hãy nói thẳng
 ` : ''}
 
-Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
+Hãy trả lời chính xác, tự nhiên bằng tiếng Việt. Có thể dùng 1-3 emoji phù hợp.`
     };
 
     const messages = [systemPrompt, ...workingMemory];
