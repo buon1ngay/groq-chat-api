@@ -18,7 +18,6 @@ if (REDIS_ENABLED) {
 
 const memoryStore = new Map();
 
-// Simple thread-safe cache implementation
 class SimpleCache {
   constructor(ttl = 600000, maxSize = 100) {
     this.cache = new Map();
@@ -37,7 +36,6 @@ class SimpleCache {
   get(key) {
     const item = this.cache.get(key);
     if (!item) return null;
-
     const age = Date.now() - item.timestamp;
     if (age > this.ttl) {
       this.cache.delete(key);
@@ -55,7 +53,6 @@ class SimpleCache {
   }
 }
 
-// Config
 const SEARCH_CONFIG = {
   CACHE_TTL_MINUTES: 30,
   DETECTION_CACHE_TTL_MINUTES: 60
@@ -88,24 +85,25 @@ const MEMORY_CONFIG = {
   SUMMARY_THRESHOLD: 40
 };
 
-// ✅ OPTIMIZATION #1: Pre-compiled detection patterns
 const DETECTION_PATTERNS = {
   never: /^(chào|hello|hi|xin chào|hey|cảm ơn|thank|thanks|tạm biệt|bye|goodbye|ok|okay|được|rồi|ừ|uhm)$/i,
   explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp)/i,
-  realtime: /(giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay)/i,
-  current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang|ai là|là ai)/i,
+  realtime: /(giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức|tin mới|hôm nay)/i,
+  current: /(hiện nay|hiện tại|bây giờ|năm nay|mới nhất|gần đây|vừa rồi|đang|ai là|là ai)/i,
+  verification: /(có đúng|có phải|thật không|sự thật|xác nhận|kiểm tra|có thật|sai rồi|đúng không)/i,
+  comparison: /(so với|so sánh|khác gì|giống gì|hơn|kém)/i,
+  factual_question: /(ai|cái gì|là gì|ở đâu|khi nào|thế nào|tại sao|vì sao|bao nhiêu|mấy)/i,
   concept: /^.*(là gì|nghĩa là gì|định nghĩa|ý nghĩa|giải thích|cho.*biết về|nói về)/i,
-  advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i
+  advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i,
+  creative: /(viết|tạo|làm|code|lập trình|thiết kế|vẽ)/i
 };
 
-// ✅ OPTIMIZATION #5: Conditional stats (only in dev)
 const IS_DEV = process.env.NODE_ENV === 'development';
 const stats = IS_DEV ? {
   search: { total: 0, cacheHits: 0 },
   perf: { responseCacheHits: 0, totalRequests: 0, avgResponseTime: 0 }
 } : null;
 
-// ✅ OPTIMIZATION #3: Normalize for better cache hit rate
 function normalizeForCache(message) {
   return message
     .toLowerCase()
@@ -114,8 +112,6 @@ function normalizeForCache(message) {
     .replace(/\s+/g, ' ')
     .substring(0, 100);
 }
-
-// === STORAGE HELPERS ===
 
 async function setData(key, value, ttl = null) {
   if (redis) {
@@ -172,19 +168,15 @@ async function setExpire(key, ttl) {
   return true;
 }
 
-// === UTILITY FUNCTIONS ===
-
 function safeParseJSON(text, fallback = {}) {
   try {
     let cleaned = text.trim();
     cleaned = cleaned.replace(/```json\n?/g, '');
     cleaned = cleaned.replace(/```\n?/g, '');
-    
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       cleaned = jsonMatch[0];
     }
-    
     return JSON.parse(cleaned);
   } catch (error) {
     console.error('JSON parse error:', error.message);
@@ -203,9 +195,6 @@ async function retryWithBackoff(fn, maxRetries = 2) {
   }
 }
 
-// === SEARCH APIs ===
-
-// ✅ OPTIMIZATION #2: Generic search wrapper
 async function searchWithRetry(searchFn, name) {
   try {
     return await retryWithBackoff(searchFn);
@@ -224,6 +213,9 @@ const searchWikipedia = (query) => searchWithRetry(async () => {
       limit: 3,
       format: 'json'
     },
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; KamiBot/1.0)'
+    },
     timeout: 4000
   });
 
@@ -232,7 +224,12 @@ const searchWikipedia = (query) => searchWithRetry(async () => {
 
   const pageTitle = titles[0];
   const summaryUrl = `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pageTitle)}`;
-  const summaryResponse = await axios.get(summaryUrl, { timeout: 4000 });
+  const summaryResponse = await axios.get(summaryUrl, { 
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; KamiBot/1.0)'
+    },
+    timeout: 4000 
+  });
   const data = summaryResponse.data;
   
   return {
@@ -300,54 +297,68 @@ const searchTavily = (query) => {
   }, 'Tavily');
 };
 
-// === SEARCH DETECTION ===
 function quickDetect(message) {
   const lower = message.toLowerCase().trim();
   
-  // Never search - casual conversation
   if (DETECTION_PATTERNS.never.test(lower)) {
     return { needsSearch: false, confidence: 1.0, reason: 'casual' };
   }
   
-  // Explicit search commands
   if (DETECTION_PATTERNS.explicit.test(lower)) {
-    return { needsSearch: true, confidence: 1.0, type: 'search' };
+    return { needsSearch: true, confidence: 1.0, type: 'knowledge' };
   }
   
-  // Real-time data
   if (DETECTION_PATTERNS.realtime.test(lower)) {
     return { needsSearch: true, confidence: 1.0, type: 'realtime' };
   }
   
-  // Current events/people
-  if (DETECTION_PATTERNS.current.test(lower)) {
+  const hasFactualQuestion = DETECTION_PATTERNS.factual_question.test(lower);
+  const hasCurrent = DETECTION_PATTERNS.current.test(lower);
+  const hasVerification = DETECTION_PATTERNS.verification.test(lower);
+  const hasComparison = DETECTION_PATTERNS.comparison.test(lower);
+  
+  if (hasVerification) {
+    return { needsSearch: true, confidence: 0.85, type: 'knowledge' };
+  }
+  
+  if (hasComparison) {
+    return { needsSearch: true, confidence: 0.8, type: 'knowledge' };
+  }
+  
+  if (hasCurrent) {
     return { needsSearch: true, confidence: 0.9, type: 'knowledge' };
   }
   
-  // Concept questions - AI can answer
-  if (DETECTION_PATTERNS.concept.test(lower)) {
-    const commonTopics = /(python|javascript|lập trình|code|toán|vật lý|hóa|sinh|văn|nghệ thuật)/i;
-    if (commonTopics.test(lower)) {
-      return { needsSearch: false, confidence: 0.9 };
+  if (hasFactualQuestion) {
+    const aiTopics = /(lập trình|code|python|javascript|toán|vật lý|hóa|sinh|văn|nghệ thuật|nấu ăn|sức khỏe|tâm lý|cách|làm sao|thế nào)/i;
+    
+    if (aiTopics.test(lower)) {
+      return { needsSearch: false, confidence: 0.75, reason: 'ai_knowledge' };
     }
+    
+    return { needsSearch: true, confidence: 0.7, type: 'knowledge' };
   }
   
-  // Advice/opinion - AI can answer
+  if (DETECTION_PATTERNS.creative.test(lower)) {
+    return { needsSearch: false, confidence: 0.9, reason: 'creative' };
+  }
+  
   if (DETECTION_PATTERNS.advice.test(lower)) {
-    return { needsSearch: false, confidence: 0.85 };
+    return { needsSearch: false, confidence: 0.85, reason: 'advice' };
   }
   
-  // Default: uncertain
-  return { needsSearch: false, confidence: 0.5 };
+  if (DETECTION_PATTERNS.concept.test(lower)) {
+    return { needsSearch: false, confidence: 0.8, reason: 'concept' };
+  }
+  
+  return { needsSearch: false, confidence: 0.5, reason: 'uncertain' };
 }
 
-// ✅ OPTIMIZATION #7: Simplified shouldSearch (120 lines → 40 lines)
 async function shouldSearch(message, groq) {
   if (IS_DEV) stats.search.total++;
   
   const cacheKey = normalizeForCache(message);
   
-  // Layer 1: Cache
   const cached = detectionCache.get(cacheKey);
   if (cached) {
     if (IS_DEV) stats.search.cacheHits++;
@@ -355,28 +366,39 @@ async function shouldSearch(message, groq) {
     return cached;
   }
   
-  // Layer 2: Quick detect
   const decision = quickDetect(message);
   
-  // High confidence → cache & return
-  if (decision.confidence >= 0.8) {
+  if (decision.confidence >= 0.75) {
     detectionCache.set(cacheKey, decision);
-    console.log(`⚡ Quick decision: ${decision.needsSearch ? 'SEARCH' : 'SKIP'} (${decision.confidence})`);
+    console.log(`⚡ Quick decision: ${decision.needsSearch ? 'SEARCH' : 'SKIP'} (${decision.confidence}, ${decision.reason || decision.type})`);
     return decision;
   }
   
-  // Low confidence → AI detection
-  console.log(`🤖 Using AI detection`);
+  console.log(`🤖 Using AI detection (low confidence: ${decision.confidence})`);
   try {
     const response = await groq.chat.completions.create({
       messages: [
         { 
           role: 'system', 
-          content: 'Return JSON only: {needsSearch: boolean, type: string}' 
+          content: `Quyết định xem câu hỏi có cần tìm kiếm internet không.
+
+CẦN TÌM KIẾM nếu:
+- Thông tin thời gian thực (giá cả, thời tiết, tin tức)
+- Sự kiện hiện tại, người nổi tiếng, dữ liệu mới
+- Xác minh sự thật ("có đúng", "có phải", "sai rồi")
+- So sánh dữ liệu cụ thể
+
+KHÔNG CẦN nếu:
+- Hỏi cách làm, lời khuyên
+- Khái niệm cơ bản (toán, khoa học, lập trình)
+- Sáng tạo (viết, code, thiết kế)
+- Trò chuyện thông thường
+
+Trả về JSON: {"needsSearch": true/false, "type": "realtime"/"knowledge"}` 
         },
         { 
           role: 'user', 
-          content: `Need internet search? "${message}"` 
+          content: `Câu hỏi: "${message}"` 
         }
       ],
       model: 'llama-3.1-8b-instant',
@@ -393,15 +415,19 @@ async function shouldSearch(message, groq) {
     };
     
     detectionCache.set(cacheKey, aiDecision);
+    console.log(`🤖 AI decision: ${aiDecision.needsSearch ? 'SEARCH' : 'SKIP'} (${aiDecision.type})`);
     return aiDecision;
   } catch (error) {
     console.error('AI detection error:', error);
-    detectionCache.set(cacheKey, decision);
-    return decision;
+    const fallbackDecision = {
+      needsSearch: decision.confidence >= 0.4,
+      confidence: 0.6,
+      type: 'knowledge'
+    };
+    detectionCache.set(cacheKey, fallbackDecision);
+    return fallbackDecision;
   }
 }
-
-// === SMART SEARCH ===
 
 async function smartSearch(query, searchType) {
   const cacheKey = normalizeForCache(query);
@@ -424,10 +450,11 @@ async function smartSearch(query, searchType) {
     }
   }
 
-  if (searchType === 'knowledge') {
+  if (searchType === 'knowledge' || !searchType) {
     const searches = [
       searchWikipedia(query),
-      TAVILY_API_KEY ? searchTavily(query) : null
+      TAVILY_API_KEY ? searchTavily(query) : null,
+      SERPER_API_KEY ? searchSerper(query) : null
     ].filter(Boolean);
     
     const results = await Promise.allSettled(searches);
@@ -439,18 +466,9 @@ async function smartSearch(query, searchType) {
     }
   }
 
-  console.log(`🔄 Fallback to Wikipedia`);
-  result = await searchWikipedia(query);
-  
-  if (result) {
-    searchCache.set(cacheKey, result);
-    return result;
-  }
-
+  console.log(`❌ No search results found`);
   return null;
 }
-
-// === MEMORY FUNCTIONS ===
 
 async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
@@ -606,7 +624,6 @@ async function markExtracted(userId, conversationId, conversationHistory) {
   }), MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
 }
 
-// ✅ OPTIMIZATION #4: Shared merge function (eliminates 60 lines of duplication)
 function mergeProfile(currentProfile, newInfo) {
   const updated = { ...currentProfile };
   
@@ -621,8 +638,6 @@ function mergeProfile(currentProfile, newInfo) {
   
   return updated;
 }
-
-// === API KEY MANAGEMENT ===
 
 function getRandomKeyIndex() {
   return Math.floor(Math.random() * API_KEYS.length);
@@ -730,8 +745,6 @@ async function callTempGroqWithRetry(userId, fn) {
   throw new Error('Đã thử hết tất cả API keys cho tempGroq');
 }
 
-// === MAIN HANDLER ===
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -757,69 +770,70 @@ export default async function handler(req, res) {
     }
 
     const finalConversationId = conversationId || 'default';
-// ✅ XỬ LÝ COMMANDS
-if (message === '/history') {
-  const conversationHistory = await getShortTermMemory(userId, finalConversationId);
-  
-  if (conversationHistory.length === 0) {
-    return res.status(200).json({
-      success: true,
-      message: "📭 Chưa có lịch sử chat nào.",
-      userId: userId,
-      conversationId: finalConversationId
-    });
-  }
 
-  let historyText = "🕘 LỊCH SỬ CHAT\n\n";
-  const recentMessages = conversationHistory.slice(-30);
-  
-  recentMessages.forEach((msg) => {
-    if (msg.role === 'user') {
-      historyText += `👤 Bạn: ${msg.content}\n\n`;
-    } else if (msg.role === 'assistant') {
-      historyText += `🤖 Kami: ${msg.content}\n\n`;
+    if (message === '/history') {
+      const conversationHistory = await getShortTermMemory(userId, finalConversationId);
+      
+      if (conversationHistory.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: "📭 Chưa có lịch sử chat nào.",
+          userId: userId,
+          conversationId: finalConversationId
+        });
+      }
+
+      let historyText = "🕘 LỊCH SỬ CHAT\n\n";
+      const recentMessages = conversationHistory.slice(-30);
+      
+      recentMessages.forEach((msg) => {
+        if (msg.role === 'user') {
+          historyText += `👤 Bạn: ${msg.content}\n\n`;
+        } else if (msg.role === 'assistant') {
+          historyText += `🤖 Kami: ${msg.content}\n\n`;
+        }
+      });
+
+      historyText += `\n📊 Tổng cộng: 30 tin cuối/${conversationHistory.length} tin nhắn`;
+
+      return res.status(200).json({
+        success: true,
+        message: historyText,
+        userId: userId,
+        conversationId: finalConversationId
+      });
     }
-  });
 
-  historyText += `\n📊 Tổng cộng: 30 tin cuối/${conversationHistory.length} tin nhắn`;
+    if (message === '/memory') {
+      const userProfile = await getLongTermMemory(userId);
+      const summary = await getSummary(userId, finalConversationId);
 
-  return res.status(200).json({
-    success: true,
-    message: historyText,
-    userId: userId,
-    conversationId: finalConversationId
-  });
-}
+      let memoryText = "🧠 BỘ NHỚ AI\n\n";
 
-if (message === '/memory') {
-  const userProfile = await getLongTermMemory(userId);
-  const summary = await getSummary(userId, finalConversationId);
+      if (Object.keys(userProfile).length === 0) {
+        memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
+      } else {
+        memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
+        for (const [key, value] of Object.entries(userProfile)) {
+          const displayKey = key.charAt(0).toUpperCase() + key.slice(1);
+          memoryText += `▪️ ${displayKey}: ${value}\n`;
+        }
+        memoryText += "\n";
+      }
 
-  let memoryText = "🧠 BỘ NHỚ AI\n\n";
+      if (summary) {
+        memoryText += "📝 TÓM TẮT HỘI THOẠI:\n";
+        memoryText += summary;
+      }
 
-  if (Object.keys(userProfile).length === 0) {
-    memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
-  } else {
-    memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
-    for (const [key, value] of Object.entries(userProfile)) {
-      const displayKey = key.charAt(0).toUpperCase() + key.slice(1);
-      memoryText += `▪️ ${displayKey}: ${value}\n`;
+      return res.status(200).json({
+        success: true,
+        message: memoryText,
+        userId: userId,
+        conversationId: finalConversationId
+      });
     }
-    memoryText += "\n";
-  }
 
-  if (summary) {
-    memoryText += "📝 TÓM TẮT HỘI THOẠI:\n";
-    memoryText += summary;
-  }
-
-  return res.status(200).json({
-    success: true,
-    message: memoryText,
-    userId: userId,
-    conversationId: finalConversationId
-  });
-}
     if (API_KEYS.length === 0) {
       return res.status(500).json({ 
         success: false,
@@ -831,7 +845,6 @@ if (message === '/memory') {
 
     if (IS_DEV) stats.perf.totalRequests++;
 
-    // Check response cache FIRST
     const responseCacheKey = `resp:${userId}:${normalizeForCache(message)}`;
     const cachedResponse = responseCache.get(responseCacheKey);
     
@@ -860,7 +873,6 @@ if (message === '/memory') {
       });
     }
 
-    // Load memory in parallel
     const [conversationHistory, userProfile] = await Promise.all([
       getShortTermMemory(userId, finalConversationId),
       getLongTermMemory(userId)
@@ -868,7 +880,6 @@ if (message === '/memory') {
 
     console.log(`💾 Loaded ${conversationHistory.length} messages`);
 
-    // Search detection with quick detect
     let searchResult = null;
     const searchCacheKey = normalizeForCache(message);
     const cachedDecision = detectionCache.get(searchCacheKey);
@@ -882,7 +893,7 @@ if (message === '/memory') {
       searchDecision = quickDetect(message);
       console.log(`⚡ Quick detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'}`);
       
-      if (searchDecision.confidence >= 0.8) {
+      if (searchDecision.confidence >= 0.75) {
         detectionCache.set(searchCacheKey, searchDecision);
       }
     }
@@ -895,8 +906,7 @@ if (message === '/memory') {
       }
     }
 
-    // Background: AI detection for low confidence cases
-    if (!cachedDecision && searchDecision.confidence < 0.8) {
+    if (!cachedDecision && searchDecision.confidence < 0.75) {
       callTempGroqWithRetry(userId, async (groq) => {
         const aiDecision = await shouldSearch(message, groq);
         detectionCache.set(searchCacheKey, aiDecision);
@@ -909,13 +919,11 @@ if (message === '/memory') {
       }).catch(err => console.error('Background detection error:', err));
     }
 
-    // Add user message
     conversationHistory.push({
       role: 'user',
       content: message.trim()
     });
 
-    // Handle summary (lazy load)
     let workingMemory = conversationHistory;
     let existingSummary = null;
     
@@ -938,7 +946,6 @@ if (message === '/memory') {
       }
     }
 
-    // Build context
     const currentDate = new Date().toLocaleDateString('vi-VN', {
       weekday: 'long',
       year: 'numeric',
@@ -965,14 +972,12 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
 
     const messages = [systemPrompt, ...workingMemory];
 
-    // Call main AI
     console.log(`🤖 Calling AI with ${workingMemory.length} messages...`);
     const { groq, chatCompletion } = await callGroqWithRetry(userId, messages);
     const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
     console.log(`✅ AI responded`);
 
-    // Save response
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
@@ -980,10 +985,8 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
 
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // Cache response
     responseCache.set(responseCacheKey, assistantMessage);
 
-    // Background: Extract personal info
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Background extracting...`);
       
@@ -1004,7 +1007,6 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
         .catch(err => console.error('Background extract error:', err));
     }
 
-    // Safety extract before TTL expires
     if (redis) {
       const chatKey = `chat:${userId}:${finalConversationId}`;
       const ttl = await redis.ttl(chatKey);
@@ -1028,7 +1030,6 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
       }
     }
 
-    // Response
     const responseTime = Date.now() - startTime;
     
     if (IS_DEV) {
