@@ -373,16 +373,13 @@ async function shouldSearch(message, groq) {
   const cached = detectionCache.get(cacheKey);
   if (cached) {
     if (IS_DEV) stats.search.cacheHits++;
-    console.log(`💾 Detection cache hit`);
     return cached;
   }
   const decision = quickDetect(message);
   if (decision.confidence >= 0.8) {
     detectionCache.set(cacheKey, decision);
-    console.log(`⚡ Quick decision: ${decision.needsSearch ? 'SEARCH' : 'SKIP'} (${decision.confidence})`);
     return decision;
   }
-  console.log(`🤖 Using AI detection`);
   try {
     const response = await groq.chat.completions.create({
       messages: [
@@ -421,17 +418,12 @@ async function smartSearch(query, searchType) {
   
   const cached = searchCache.get(cacheKey);
   if (cached) {
-    console.log(`✅ Search cache hit`);
     return cached;
   }
-
-  console.log(`🔍 Search type: ${searchType}, Query: "${query}"`);
-
   let result = null;
   const searches = [];
   if (searchType === 'realtime') {
     if (SERPER_API_KEY) {
-      console.log(`🔥 Trying Serper (realtime)...`);
       result = await searchSerper(query);
       if (result) {
         searchCache.set(cacheKey, result);
@@ -439,7 +431,6 @@ async function smartSearch(query, searchType) {
       }
     }
     if (TAVILY_API_KEY) {
-      console.log(`🔄 Fallback to Tavily...`);
       result = await searchTavily(query);
       if (result) {
         searchCache.set(cacheKey, result);
@@ -451,29 +442,22 @@ async function smartSearch(query, searchType) {
     if (TAVILY_API_KEY) searches.push(searchTavily(query));
     if (SERPER_API_KEY) searches.push(searchSerper(query));
     searches.push(searchWikipedia(query));
-    
-    console.log(`🔍 Trying ${searches.length} sources in parallel...`);
-    
     const results = await Promise.allSettled(searches);
     for (const r of results) {
       if (r.status === 'fulfilled' && r.value) {
         result = r.value;
-        console.log(`✅ Got result from ${result.source}`);
         searchCache.set(cacheKey, result);
         return result;
       }
     }
   }
   if (!result) {
-    console.log(`🌍 Trying English Wikipedia...`);
     result = await searchWikipediaEN(query);
     if (result) {
       searchCache.set(cacheKey, result);
       return result;
     }
   }
-
-  console.log(`❌ All search sources failed`);
   return null;
 }
 async function getShortTermMemory(userId, conversationId) {
@@ -842,17 +826,12 @@ export default async function handler(req, res) {
         error: 'No API keys configured' 
       });
     }
-
-    console.log(`📱 Request from ${userId}: "${message.substring(0, 50)}..."`);
-
     if (IS_DEV) stats.perf.totalRequests++;
     const responseCacheKey = `resp:${userId}:${normalizeForCache(message)}`;
     const cachedResponse = responseCache.get(responseCacheKey);
     
     if (cachedResponse) {
       if (IS_DEV) stats.perf.responseCacheHits++;
-      console.log(`💾 Response cache hit`);
-      
       const conversationHistory = await getShortTermMemory(userId, finalConversationId);
       
       conversationHistory.push(
@@ -885,11 +864,8 @@ export default async function handler(req, res) {
     
     if (cachedDecision) {
       searchDecision = cachedDecision;
-      console.log(`💾 Using cached search decision`);
     } else {
       searchDecision = quickDetect(message);
-      console.log(`🎯 Detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'} (${searchDecision.confidence}) - ${searchDecision.type || searchDecision.reason}`);
-      
       if (searchDecision.confidence >= 0.8) {
         detectionCache.set(searchCacheKey, searchDecision);
       }
@@ -932,8 +908,6 @@ export default async function handler(req, res) {
       workingMemory = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
       
       if (!existingSummary) {
-        console.log(`📝 Background summarizing...`);
-        
         callTempGroqWithRetry(userId, async (groq) => {
           const summary = await summarizeOldMessages(groq, oldMessages);
           await saveSummary(userId, finalConversationId, summary);
@@ -1014,15 +988,12 @@ Hãy trả lời chính xác, tự nhiên bằng tiếng Việt. Có thể dùng
       const daysRemaining = ttl / 86400;
       
       if (daysRemaining > 0 && daysRemaining < 2 && conversationHistory.length >= 3) {
-        console.log(`⚠ Safety extract...`);
-        
         callTempGroqWithRetry(userId, async (groq) => {
           const newInfo = await extractPersonalInfo(groq, conversationHistory);
           
           if (Object.keys(newInfo).length > 0) {
             const updatedProfile = mergeProfile(userProfile, newInfo);
             await saveLongTermMemory(userId, updatedProfile);
-            console.log(`✅ Safety profile saved`);
           }
           
           return newInfo;
@@ -1037,14 +1008,6 @@ Hãy trả lời chính xác, tự nhiên bằng tiếng Việt. Có thể dùng
         (stats.perf.avgResponseTime * (stats.perf.totalRequests - 1) + responseTime) / stats.perf.totalRequests;
       
       if (stats.perf.totalRequests % 10 === 0) {
-        console.log(`📊 Stats:`, {
-          totalRequests: stats.perf.totalRequests,
-          responseCacheHitRate: `${Math.round(stats.perf.responseCacheHits / stats.perf.totalRequests * 100)}%`,
-          avgResponseTime: `${Math.round(stats.perf.avgResponseTime)}ms`,
-          searchCacheHitRate: stats.search.total > 0 
-            ? `${Math.round(stats.search.cacheHits / stats.search.total * 100)}%` 
-            : 'N/A'
-        });
       }
     }
     
