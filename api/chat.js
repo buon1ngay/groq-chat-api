@@ -779,8 +779,21 @@ export default async function handler(req, res) {
         memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
       } else {
         memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
+        
+        // Chỉ thay đổi cách HIỂN THỊ, không thay đổi field name trong DB
+        const fieldNames = {
+          name: "Tên",
+          nickname: "Biệt danh",
+          family: "Gia đình",
+          age: "Tuổi",
+          job: "Nghề nghiệp",
+          hobbies: "Sở thích",
+          location: "Nơi ở",
+          other: "Khác"
+        };
+        
         for (const [key, value] of Object.entries(userProfile)) {
-          const displayKey = key.charAt(0).toUpperCase() + key.slice(1);
+          const displayKey = fieldNames[key] || key.charAt(0).toUpperCase() + key.slice(1);
           memoryText += `▪️ ${displayKey}: ${value}\n`;
         }
         memoryText += "\n";
