@@ -80,8 +80,8 @@ const SERPER_API_KEY = process.env.SERPER_API_KEY;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 const MEMORY_CONFIG = {
-  SHORT_TERM_DAYS: 14,
-  WORKING_MEMORY_LIMIT: 20,
+  SHORT_TERM_DAYS: 15,
+  WORKING_MEMORY_LIMIT: 30,
   LONG_TERM_DAYS: 365,
   SUMMARY_THRESHOLD: 40
 };
@@ -749,7 +749,7 @@ export default async function handler(req, res) {
       }
 
       let historyText = "🕘 LỊCH SỬ CHAT\n\n";
-      const recentMessages = conversationHistory.slice(-30);
+      const recentMessages = conversationHistory.slice(-40);
       
       recentMessages.forEach((msg) => {
         if (msg.role === 'user') {
@@ -759,7 +759,7 @@ export default async function handler(req, res) {
         }
       });
 
-      historyText += `\n📊 Tổng cộng: 30 tin cuối/${conversationHistory.length} tin nhắn`;
+      historyText += `\n📊 Tổng cộng: 40 tin cuối/${conversationHistory.length} tin nhắn`;
 
       return res.status(200).json({
         success: true,
@@ -779,8 +779,6 @@ export default async function handler(req, res) {
         memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
       } else {
         memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
-        
-        // Chỉ thay đổi cách HIỂN THỊ, không thay đổi field name trong DB
         const fieldNames = {
           name: "Tên",
           nickname: "Biệt danh",
