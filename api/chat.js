@@ -18,7 +18,6 @@ if (REDIS_ENABLED) {
 
 const memoryStore = new Map();
 
-// Simple thread-safe cache implementation
 class SimpleCache {
   constructor(ttl = 600000, maxSize = 100) {
     this.cache = new Map();
@@ -55,7 +54,6 @@ class SimpleCache {
   }
 }
 
-// Config
 const SEARCH_CONFIG = {
   CACHE_TTL_MINUTES: 30,
   DETECTION_CACHE_TTL_MINUTES: 60
@@ -88,26 +86,21 @@ const MEMORY_CONFIG = {
   SUMMARY_THRESHOLD: 40
 };
 
-// ✅ OPTIMIZATION #1: Pre-compiled detection patterns
 const DETECTION_PATTERNS = {
   never: /^(chào|hello|hi|xin chào|hey|cảm ơn|thank|thanks|tạm biệt|bye|goodbye|ok|okay|được|rồi|ừ|uhm)$/i,
   explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp)/i,
-  realtime: /(giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay|giá cổ phiếu|chứng khoán|crypto)/i,
-  current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang|ai là|là ai|hiện là|đương nhiệm)/i,
+  realtime: /(giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay)/i,
+  current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang|ai là|là ai)/i,
   concept: /^.*(là gì|nghĩa là gì|định nghĩa|ý nghĩa|giải thích|cho.*biết về|nói về)/i,
-  advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i,
-  factual: /(ai|khi nào|ở đâu|bao nhiêu|có phải|có đúng|thế nào|ra sao|tại sao|vì sao|như thế nào)/i,
-  entity: /(tổng thống|thủ tướng|ceo|chủ tịch|giám đốc|ca sĩ|diễn viên|vận động viên|nhà khoa học|công ty)/i
+  advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i
 };
 
-// ✅ OPTIMIZATION #5: Conditional stats (only in dev)
 const IS_DEV = process.env.NODE_ENV === 'development';
 const stats = IS_DEV ? {
   search: { total: 0, cacheHits: 0 },
   perf: { responseCacheHits: 0, totalRequests: 0, avgResponseTime: 0 }
 } : null;
 
-// ✅ OPTIMIZATION #3: Normalize for better cache hit rate
 function normalizeForCache(message) {
   return message
     .toLowerCase()
@@ -116,8 +109,6 @@ function normalizeForCache(message) {
     .replace(/\s+/g, ' ')
     .substring(0, 100);
 }
-
-// === STORAGE HELPERS ===
 
 async function setData(key, value, ttl = null) {
   if (redis) {
@@ -174,8 +165,6 @@ async function setExpire(key, ttl) {
   return true;
 }
 
-// === UTILITY FUNCTIONS ===
-
 function safeParseJSON(text, fallback = {}) {
   try {
     let cleaned = text.trim();
@@ -205,9 +194,6 @@ async function retryWithBackoff(fn, maxRetries = 2) {
   }
 }
 
-// === SEARCH APIs ===
-
-// ✅ OPTIMIZATION #2: Generic search wrapper
 async function searchWithRetry(searchFn, name) {
   try {
     return await retryWithBackoff(searchFn);
@@ -217,7 +203,6 @@ async function searchWithRetry(searchFn, name) {
   }
 }
 
-// ✅ FIX #2: Wikipedia with User-Agent header
 const searchWikipedia = (query) => searchWithRetry(async () => {
   const searchUrl = 'https://vi.wikipedia.org/w/api.php';
   const searchResponse = await axios.get(searchUrl, {
@@ -228,7 +213,7 @@ const searchWikipedia = (query) => searchWithRetry(async () => {
       format: 'json'
     },
     headers: {
-      'User-Agent': 'KamiBot/1.0 (https://github.com/kamibot; contact@kamibot.com)'
+      'User-Agent': 'Mozilla/5.0 (compatible; KamiBot/1.0)'
     },
     timeout: 4000
   });
@@ -240,7 +225,7 @@ const searchWikipedia = (query) => searchWithRetry(async () => {
   const summaryUrl = `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pageTitle)}`;
   const summaryResponse = await axios.get(summaryUrl, { 
     headers: {
-      'User-Agent': 'KamiBot/1.0 (https://github.com/kamibot; contact@kamibot.com)'
+      'User-Agent': 'Mozilla/5.0 (compatible; KamiBot/1.0)'
     },
     timeout: 4000 
   });
@@ -311,71 +296,44 @@ const searchTavily = (query) => {
   }, 'Tavily');
 };
 
-// === SEARCH DETECTION ===
-// ✅ FIX #1: More aggressive quick detection with proper confidence
 function quickDetect(message) {
   const lower = message.toLowerCase().trim();
   
-  // Never search - casual conversation
   if (DETECTION_PATTERNS.never.test(lower)) {
     return { needsSearch: false, confidence: 1.0, reason: 'casual' };
   }
   
-  // Explicit search commands
   if (DETECTION_PATTERNS.explicit.test(lower)) {
     return { needsSearch: true, confidence: 1.0, type: 'search' };
   }
   
-  // Real-time data
   if (DETECTION_PATTERNS.realtime.test(lower)) {
     return { needsSearch: true, confidence: 1.0, type: 'realtime' };
   }
   
-  // Current events/people
   if (DETECTION_PATTERNS.current.test(lower)) {
-    return { needsSearch: true, confidence: 0.95, type: 'knowledge' };
-  }
-  
-  // Entity-based questions (positions, people)
-  if (DETECTION_PATTERNS.entity.test(lower)) {
     return { needsSearch: true, confidence: 0.9, type: 'knowledge' };
   }
   
-  // Factual questions (who, when, where)
-  if (DETECTION_PATTERNS.factual.test(lower)) {
-    // Check if it's about well-known concepts
-    const commonTopics = /(python|javascript|lập trình|code|toán học|vật lý|hóa học)/i;
-    if (!commonTopics.test(lower)) {
-      return { needsSearch: true, confidence: 0.85, type: 'knowledge' };
-    }
-  }
-  
-  // Concept questions - check if known or unknown
   if (DETECTION_PATTERNS.concept.test(lower)) {
     const commonTopics = /(python|javascript|lập trình|code|toán|vật lý|hóa|sinh|văn|nghệ thuật)/i;
     if (commonTopics.test(lower)) {
-      return { needsSearch: false, confidence: 0.9, reason: 'known_concept' };
+      return { needsSearch: false, confidence: 0.9 };
     }
-    // Unknown concepts should be searched
-    return { needsSearch: true, confidence: 0.8, type: 'knowledge' };
   }
   
-  // Advice/opinion - AI can answer
   if (DETECTION_PATTERNS.advice.test(lower)) {
-    return { needsSearch: false, confidence: 0.85, reason: 'advice' };
+    return { needsSearch: false, confidence: 0.85 };
   }
   
-  // ✅ FIX #1.1: Higher default confidence for caching
-  return { needsSearch: false, confidence: 0.75, reason: 'default' };
+  return { needsSearch: false, confidence: 0.5 };
 }
 
-// ✅ FIX #1.2: Simplified shouldSearch - always cacheable
 async function shouldSearch(message, groq) {
   if (IS_DEV) stats.search.total++;
   
   const cacheKey = normalizeForCache(message);
   
-  // Layer 1: Cache
   const cached = detectionCache.get(cacheKey);
   if (cached) {
     if (IS_DEV) stats.search.cacheHits++;
@@ -383,18 +341,50 @@ async function shouldSearch(message, groq) {
     return cached;
   }
   
-  // Layer 2: Quick detect
   const decision = quickDetect(message);
   
-  // ✅ ALWAYS cache quick decisions (confidence always >= 0.75)
-  detectionCache.set(cacheKey, decision);
-  console.log(`⚡ Quick decision: ${decision.needsSearch ? 'SEARCH' : 'SKIP'} (${decision.confidence})`);
+  if (decision.confidence >= 0.8) {
+    detectionCache.set(cacheKey, decision);
+    console.log(`⚡ Quick decision: ${decision.needsSearch ? 'SEARCH' : 'SKIP'} (${decision.confidence})`);
+    return decision;
+  }
   
-  return decision;
+  console.log(`🤖 Using AI detection`);
+  try {
+    const response = await groq.chat.completions.create({
+      messages: [
+        { 
+          role: 'system', 
+          content: 'Return JSON only: {needsSearch: boolean, type: string}' 
+        },
+        { 
+          role: 'user', 
+          content: `Need internet search? "${message}"` 
+        }
+      ],
+      model: 'llama-3.1-8b-instant',
+      temperature: 0,
+      max_tokens: 50,
+      response_format: { type: "json_object" }
+    });
+    
+    const result = safeParseJSON(response.choices[0]?.message?.content || '{}');
+    const aiDecision = {
+      needsSearch: result.needsSearch || false,
+      confidence: 0.9,
+      type: result.type || 'knowledge'
+    };
+    
+    detectionCache.set(cacheKey, aiDecision);
+    return aiDecision;
+  } catch (error) {
+    console.error('AI detection error:', error);
+    detectionCache.set(cacheKey, decision);
+    return decision;
+  }
 }
 
-// === SMART SEARCH ===
-// ✅ FIX #3: Handle all search types properly
+// ✅ SỬA: Sequential fallback - Wikipedia → Serper → Tavily
 async function smartSearch(query, searchType) {
   const cacheKey = normalizeForCache(query);
   
@@ -405,77 +395,45 @@ async function smartSearch(query, searchType) {
   }
 
   console.log(`🔍 Search type: ${searchType}`);
-
   let result = null;
 
-  // Realtime: prioritize Serper
-  if (searchType === 'realtime') {
-    if (SERPER_API_KEY) {
-      result = await searchSerper(query);
-      if (result) {
-        searchCache.set(cacheKey, result);
-        return result;
-      }
-    }
-    // Fallback to Tavily for realtime
-    if (TAVILY_API_KEY) {
-      result = await searchTavily(query);
-      if (result) {
-        searchCache.set(cacheKey, result);
-        return result;
-      }
-    }
+  // Ưu tiên 1: Wikipedia (miễn phí, ổn định)
+  console.log(`🔍 Trying Wikipedia...`);
+  result = await searchWikipedia(query);
+  if (result) {
+    console.log(`✅ Wikipedia success`);
+    searchCache.set(cacheKey, result);
+    return result;
   }
+  console.log(`❌ Wikipedia failed`);
 
-  // Knowledge: try Wikipedia first, then Tavily
-  if (searchType === 'knowledge') {
-    const searches = [
-      searchWikipedia(query),
-      TAVILY_API_KEY ? searchTavily(query) : null
-    ].filter(Boolean);
-    
-    const results = await Promise.allSettled(searches);
-    result = results.find(r => r.status === 'fulfilled' && r.value)?.value;
-    
+  // Ưu tiên 2: Serper (nếu có API key)
+  if (SERPER_API_KEY) {
+    console.log(`🔍 Trying Serper...`);
+    result = await searchSerper(query);
     if (result) {
+      console.log(`✅ Serper success`);
       searchCache.set(cacheKey, result);
       return result;
     }
+    console.log(`❌ Serper failed`);
   }
 
-  // ✅ FIX #3.1: Handle 'search' type explicitly
-  if (searchType === 'search') {
-    // Try all sources in parallel
-    const searches = [
-      SERPER_API_KEY ? searchSerper(query) : null,
-      TAVILY_API_KEY ? searchTavily(query) : null,
-      searchWikipedia(query)
-    ].filter(Boolean);
-    
-    const results = await Promise.allSettled(searches);
-    result = results.find(r => r.status === 'fulfilled' && r.value)?.value;
-    
+  // Ưu tiên 3: Tavily (fallback cuối)
+  if (TAVILY_API_KEY) {
+    console.log(`🔍 Trying Tavily...`);
+    result = await searchTavily(query);
     if (result) {
+      console.log(`✅ Tavily success`);
       searchCache.set(cacheKey, result);
       return result;
     }
+    console.log(`❌ Tavily failed`);
   }
 
-  // Final fallback: Wikipedia
-  if (!result) {
-    console.log(`🔄 Fallback to Wikipedia`);
-    result = await searchWikipedia(query);
-    
-    if (result) {
-      searchCache.set(cacheKey, result);
-      return result;
-    }
-  }
-
+  console.log(`❌ All search sources failed`);
   return null;
 }
-
-// === MEMORY FUNCTIONS ===
 
 async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
@@ -631,7 +589,6 @@ async function markExtracted(userId, conversationId, conversationHistory) {
   }), MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
 }
 
-// ✅ OPTIMIZATION #4: Shared merge function
 function mergeProfile(currentProfile, newInfo) {
   const updated = { ...currentProfile };
   
@@ -646,8 +603,6 @@ function mergeProfile(currentProfile, newInfo) {
   
   return updated;
 }
-
-// === API KEY MANAGEMENT ===
 
 function getRandomKeyIndex() {
   return Math.floor(Math.random() * API_KEYS.length);
@@ -755,8 +710,6 @@ async function callTempGroqWithRetry(userId, fn) {
   throw new Error('Đã thử hết tất cả API keys cho tempGroq');
 }
 
-// === MAIN HANDLER ===
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -783,7 +736,6 @@ export default async function handler(req, res) {
 
     const finalConversationId = conversationId || 'default';
 
-    // ✅ XỬ LÝ COMMANDS
     if (message === '/history') {
       const conversationHistory = await getShortTermMemory(userId, finalConversationId);
       
@@ -858,7 +810,6 @@ export default async function handler(req, res) {
 
     if (IS_DEV) stats.perf.totalRequests++;
 
-    // Check response cache FIRST
     const responseCacheKey = `resp:${userId}:${normalizeForCache(message)}`;
     const cachedResponse = responseCache.get(responseCacheKey);
     
@@ -887,7 +838,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Load memory in parallel
     const [conversationHistory, userProfile] = await Promise.all([
       getShortTermMemory(userId, finalConversationId),
       getLongTermMemory(userId)
@@ -895,35 +845,50 @@ export default async function handler(req, res) {
 
     console.log(`💾 Loaded ${conversationHistory.length} messages`);
 
-    // ✅ FIX #2: Synchronous search with quick detect - no background
     let searchResult = null;
     const searchCacheKey = normalizeForCache(message);
+    const cachedDecision = detectionCache.get(searchCacheKey);
     
-    // Get or create Groq instance for detection
-    const tempKeyIndex = await getUserKeyIndex(userId);
-    const tempApiKey = API_KEYS[tempKeyIndex];
-    const tempGroq = new Groq({ apiKey: tempApiKey });
+    let searchDecision = null;
     
-    const searchDecision = await shouldSearch(message, tempGroq);
-    console.log(`🔍 Search decision: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'} (${searchDecision.confidence})`);
+    if (cachedDecision) {
+      searchDecision = cachedDecision;
+      console.log(`💾 Using cached search decision`);
+    } else {
+      searchDecision = quickDetect(message);
+      console.log(`⚡ Quick detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'}`);
+      
+      if (searchDecision.confidence >= 0.8) {
+        detectionCache.set(searchCacheKey, searchDecision);
+      }
+    }
     
     if (searchDecision.needsSearch) {
       searchResult = await smartSearch(message, searchDecision.type);
       
       if (searchResult) {
         console.log(`✅ Search successful: ${searchResult.source}`);
-      } else {
-        console.log(`⚠️ Search returned no results`);
       }
     }
 
-    // Add user message
+    if (!cachedDecision && searchDecision.confidence < 0.8) {
+      callTempGroqWithRetry(userId, async (groq) => {
+        const aiDecision = await shouldSearch(message, groq);
+        detectionCache.set(searchCacheKey, aiDecision);
+        
+        if (aiDecision.needsSearch && !searchResult) {
+          await smartSearch(message, aiDecision.type);
+        }
+        
+        return aiDecision;
+      }).catch(err => console.error('Background detection error:', err));
+    }
+
     conversationHistory.push({
       role: 'user',
       content: message.trim()
     });
 
-    // Handle summary (lazy load)
     let workingMemory = conversationHistory;
     let existingSummary = null;
     
@@ -946,7 +911,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // Build context
     const currentDate = new Date().toLocaleDateString('vi-VN', {
       weekday: 'long',
       year: 'numeric',
@@ -973,14 +937,12 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
 
     const messages = [systemPrompt, ...workingMemory];
 
-    // Call main AI
     console.log(`🤖 Calling AI with ${workingMemory.length} messages...`);
     const { groq, chatCompletion } = await callGroqWithRetry(userId, messages);
     const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
     console.log(`✅ AI responded`);
 
-    // Save response
     conversationHistory.push({
       role: 'assistant',
       content: assistantMessage
@@ -988,10 +950,8 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
 
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // Cache response
     responseCache.set(responseCacheKey, assistantMessage);
 
-    // Background: Extract personal info
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Background extracting...`);
       
@@ -1012,7 +972,6 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
         .catch(err => console.error('Background extract error:', err));
     }
 
-    // Safety extract before TTL expires
     if (redis) {
       const chatKey = `chat:${userId}:${finalConversationId}`;
       const ttl = await redis.ttl(chatKey);
@@ -1036,7 +995,6 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
       }
     }
 
-    // Response
     const responseTime = Date.now() - startTime;
     
     if (IS_DEV) {
