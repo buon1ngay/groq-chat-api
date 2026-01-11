@@ -1069,20 +1069,23 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
     // Cache response
     responseCache.set(responseCacheKey, assistantMessage);
 
-    // ✅ FOREGROUND: Update summaries NGAY LẬP TỨC
+    // ✅ UPDATE SUMMARIES - SYNC BUT SAFE
     if (conversationHistory.length >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
       const expectedSummaries = Math.floor(conversationHistory.length / MEMORY_CONFIG.SUMMARY_INTERVAL);
       const currentSummaries = allSummaries.length;
       
       if (currentSummaries < expectedSummaries) {
-        console.log(`📝 Creating summary NOW (need ${expectedSummaries}, have ${currentSummaries})...`);
+        console.log(`📝 Summary needed (${expectedSummaries} expected, ${currentSummaries} current)`);
         
+        // ✅ Tạo summary NGAY với groq mới
         try {
-          // ✅ CHẠY ĐỒNG BỘ - CHỜ XONG MỚI RESPONSE
-          allSummaries = await updateSummaries(userId, finalConversationId, conversationHistory, groq);
+          const tempGroq = new Groq({ apiKey: API_KEYS[await getUserKeyIndex(userId)] });
+          const newSummaries = await updateSummaries(userId, finalConversationId, conversationHistory, tempGroq);
+          allSummaries = newSummaries; // Cập nhật để stats đúng
           console.log(`✅ Summary created: ${allSummaries.length} total`);
         } catch (err) {
-          console.error('Summary creation error:', err);
+          console.error('Summary error:', err.message);
+          // Không block response nếu summary fail
         }
       }
     }
