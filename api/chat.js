@@ -79,18 +79,16 @@ const API_KEYS = [
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
-// ✅ CONFIG: Giữ nguyên + thêm circular buffer limits
+// ✅ CONFIG
 const MEMORY_CONFIG = {
-  SHORT_TERM_DAYS: 30,           // TTL: Xóa nếu user không hoạt động 30 ngày
-  WORKING_MEMORY_LIMIT: 30,      // Gửi AI: 30 tin cuối
-  LONG_TERM_DAYS: 365,           // Profile: 1 năm
-  SUMMARY_THRESHOLD: 40,         // Tóm tắt khi > 40 tin
-  
-  // ✅ MỚI: Circular buffer limits
-  MAX_HISTORY_MESSAGES: 2000,    // Tối đa 2000 tin
-  SUMMARY_INTERVAL: 40,          // Tóm tắt mỗi 40 tin
-  MAX_SUMMARIES: 50,            // Tối đa 50 summaries
-  ACTIVE_SUMMARIES: 12           // Gửi AI: 12 summaries mới nhất
+  SHORT_TERM_DAYS: 30,
+  WORKING_MEMORY_LIMIT: 30,
+  LONG_TERM_DAYS: 365,
+  SUMMARY_THRESHOLD: 40,
+  MAX_HISTORY_MESSAGES: 2000,
+  SUMMARY_INTERVAL: 40,
+  MAX_SUMMARIES: 50,
+  ACTIVE_SUMMARIES: 12
 };
 
 const DETECTION_PATTERNS = {
@@ -438,7 +436,6 @@ async function smartSearch(query, searchType) {
   return null;
 }
 
-// ✅ CIRCULAR BUFFER: Chat History (4000 tin)
 async function getShortTermMemory(userId, conversationId) {
   const key = `chat:${userId}:${conversationId}`;
   const history = await getData(key);
@@ -464,7 +461,6 @@ async function getShortTermMemory(userId, conversationId) {
 async function saveShortTermMemory(userId, conversationId, history) {
   const key = `chat:${userId}:${conversationId}`;
   
-  // ✅ CIRCULAR BUFFER: Giới hạn 4000 tin
   const trimmedHistory = history.length > MEMORY_CONFIG.MAX_HISTORY_MESSAGES
     ? history.slice(-MEMORY_CONFIG.MAX_HISTORY_MESSAGES)
     : history;
@@ -475,7 +471,6 @@ async function saveShortTermMemory(userId, conversationId, history) {
   console.log(`💾 Saved ${trimmedHistory.length}/${history.length} messages (max: ${MEMORY_CONFIG.MAX_HISTORY_MESSAGES})`);
 }
 
-// ✅ CIRCULAR BUFFER: Summaries (100 summaries)
 async function getSummaries(userId, conversationId) {
   const key = `summaries:${userId}:${conversationId}`;
   const summaries = await getData(key);
@@ -501,7 +496,6 @@ async function getSummaries(userId, conversationId) {
 async function saveSummaries(userId, conversationId, summaries) {
   const key = `summaries:${userId}:${conversationId}`;
   
-  // ✅ CIRCULAR BUFFER: Giới hạn 100 summaries
   const trimmedSummaries = summaries.length > MEMORY_CONFIG.MAX_SUMMARIES
     ? summaries.slice(-MEMORY_CONFIG.MAX_SUMMARIES)
     : summaries;
@@ -546,51 +540,57 @@ async function createSummary(groq, messages, startIndex, endIndex) {
   }
 }
 
-// ✅ UPDATE SUMMARIES (mỗi 40 tin)
+// ✅ UPDATE SUMMARIES - FIXED
 async function updateSummaries(userId, conversationId, conversationHistory, groq) {
   const totalMessages = conversationHistory.length;
   
-  // Chỉ tóm tắt khi đạt ngưỡng
   if (totalMessages < MEMORY_CONFIG.SUMMARY_THRESHOLD) {
+    console.log(`⏭️ Chưa đủ tin để tạo summary (${totalMessages}/${MEMORY_CONFIG.SUMMARY_THRESHOLD})`);
     return [];
   }
   
   const summaries = await getSummaries(userId, conversationId);
   
-  // Tính xem cần bao nhiêu summaries
-  const expectedSummaries = Math.floor((totalMessages - MEMORY_CONFIG.WORKING_MEMORY_LIMIT) / MEMORY_CONFIG.SUMMARY_INTERVAL);
+  // ✅ SỬA: Tính đúng số summaries cần có
+  // Ví dụ: 120 tin → floor(120/40) = 3 summaries
+  const expectedSummaries = Math.floor(totalMessages / MEMORY_CONFIG.SUMMARY_INTERVAL);
   const currentSummaries = summaries.length;
   
-  // Nếu đã đủ summaries, không cần tạo mới
   if (currentSummaries >= expectedSummaries) {
+    console.log(`✅ Summaries đã đủ (${currentSummaries}/${expectedSummaries})`);
     return summaries;
   }
   
-  // Tạo summaries mới
   console.log(`📝 Creating summaries ${currentSummaries + 1} to ${expectedSummaries}...`);
   
   for (let i = currentSummaries; i < expectedSummaries; i++) {
     const startIndex = i * MEMORY_CONFIG.SUMMARY_INTERVAL;
-    const endIndex = (i + 1) * MEMORY_CONFIG.SUMMARY_INTERVAL;
+    const endIndex = Math.min((i + 1) * MEMORY_CONFIG.SUMMARY_INTERVAL, totalMessages);
     
     const messagesToSummarize = conversationHistory.slice(startIndex, endIndex);
     
-    const summary = await createSummary(groq, messagesToSummarize, startIndex, endIndex);
+    console.log(`📝 Summarizing messages ${startIndex}-${endIndex - 1} (${messagesToSummarize.length} msgs)...`);
+    
+    // ✅ SỬA: endIndex - 1 vì slice không bao gồm endIndex
+    const summary = await createSummary(groq, messagesToSummarize, startIndex, endIndex - 1);
     
     if (summary) {
       summaries.push(summary);
-      console.log(`✅ Created summary ${i + 1}: messages ${startIndex}-${endIndex}`);
+      console.log(`✅ Created summary ${i + 1}: messages ${startIndex}-${endIndex - 1}`);
+    } else {
+      console.error(`❌ Failed to create summary ${i + 1}`);
     }
   }
   
-  // Lưu summaries (tự động trim nếu > 100)
   await saveSummaries(userId, conversationId, summaries);
   
   return summaries;
 }
 
-// ✅ LẤY ACTIVE SUMMARIES (10 summaries mới nhất)
 function getActiveSummaries(summaries) {
+  if (!Array.isArray(summaries) || summaries.length === 0) {
+    return [];
+  }
   return summaries.slice(-MEMORY_CONFIG.ACTIVE_SUMMARIES);
 }
 
@@ -609,8 +609,6 @@ async function saveLongTermMemory(userId, profileData) {
   const key = `user:profile:${userId}`;
   await setHashData(key, profileData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
 }
-
-// ✅ BỎ getSummary/saveSummary cũ (thay bằng getSummaries/saveSummaries)
 
 async function extractPersonalInfo(groq, conversationHistory) {
   try {
@@ -828,96 +826,92 @@ export default async function handler(req, res) {
 
     const finalConversationId = conversationId || 'default';
 
-// ✅ COMMAND: /history
-if (message === '/history') {
-  const conversationHistory = await getShortTermMemory(userId, finalConversationId);
-  
-  if (conversationHistory.length === 0) {
-    return res.status(200).json({
-      success: true,
-      message: "📭 Chưa có lịch sử chat nào.",
-      userId: userId,
-      conversationId: finalConversationId
-    });
-  }
+    // ✅ COMMAND: /history
+    if (message === '/history') {
+      const conversationHistory = await getShortTermMemory(userId, finalConversationId);
+      
+      if (conversationHistory.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: "📭 Chưa có lịch sử chat nào.",
+          userId: userId,
+          conversationId: finalConversationId
+        });
+      }
 
-  let historyText = "🕘 LỊCH SỬ CHAT\n\n";
-  
-  // ✅ Lấy 50 tin mới nhất thay vì 40 (chuẩn hơn)
-  const recentMessages = conversationHistory.slice(-50);
-  
-  recentMessages.forEach((msg) => {
-    if (msg.role === 'user') {
-      historyText += `👤 >>>BẠN: ${msg.content}\n\n`;
-    } else if (msg.role === 'assistant') {
-      historyText += `🤖 >>>KAMI: ${msg.content}\n\n`;
+      let historyText = "🕘 LỊCH SỬ CHAT\n\n";
+      const recentMessages = conversationHistory.slice(-50);
+      
+      recentMessages.forEach((msg) => {
+        if (msg.role === 'user') {
+          historyText += `👤 **BẠN:** ${msg.content}\n\n`;
+        } else if (msg.role === 'assistant') {
+          historyText += `🤖 **KAMI:** ${msg.content}\n\n`;
+        }
+      });
+
+      historyText += `📊 Hiển thị: ${recentMessages.length}/${conversationHistory.length} tin nhắn`;
+
+      return res.status(200).json({
+        success: true,
+        message: historyText,
+        userId: userId,
+        conversationId: finalConversationId,
+        stats: {
+          totalMessages: conversationHistory.length,
+          displayedMessages: recentMessages.length,
+          maxHistoryMessages: MEMORY_CONFIG.MAX_HISTORY_MESSAGES
+        }
+      });
     }
-  });
 
-  historyText += `📊 Hiển thị: ${recentMessages.length}/${conversationHistory.length} tin nhắn`;
-
-  return res.status(200).json({
-    success: true,
-    message: historyText,
-    userId: userId,
-    conversationId: finalConversationId,
-    stats: {
-      totalMessages: conversationHistory.length,
-      displayedMessages: recentMessages.length,
-      maxHistoryMessages: MEMORY_CONFIG.MAX_HISTORY_MESSAGES
-    }
-  });
-}
     // ✅ COMMAND: /memory
-if (message === '/memory') {
-  const userProfile = await getLongTermMemory(userId);
-  const summaries = await getSummaries(userId, finalConversationId);
-  
-  // ✅ Lấy 12 summaries mới nhất
-  const activeSummaries = summaries.slice(-MEMORY_CONFIG.ACTIVE_SUMMARIES);
+    if (message === '/memory') {
+      const userProfile = await getLongTermMemory(userId);
+      const summaries = await getSummaries(userId, finalConversationId);
+      const activeSummaries = summaries.slice(-MEMORY_CONFIG.ACTIVE_SUMMARIES);
 
-  let memoryText = "🧠 BỘ NHỚ AI\n\n";
+      let memoryText = "🧠 BỘ NHỚ AI\n\n";
 
-  // Hiển thị thông tin cá nhân
-  if (Object.keys(userProfile).length === 0) {
-    memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
-  } else {
-    memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
-    const fieldNames = {
-      name: "Tên",
-      nickname: "Biệt danh",
-      family: "Gia đình",
-      age: "Tuổi",
-      job: "Nghề nghiệp",
-      hobbies: "Sở thích",
-      location: "Nơi ở",
-      other: "Khác"
-    };
-    
-    for (const [key, value] of Object.entries(userProfile)) {
-      const displayKey = fieldNames[key] || key.charAt(0).toUpperCase() + key.slice(1);
-      memoryText += `▪️ ${displayKey}: ${value}\n`;
+      if (Object.keys(userProfile).length === 0) {
+        memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
+      } else {
+        memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
+        const fieldNames = {
+          name: "Tên",
+          nickname: "Biệt danh",
+          family: "Gia đình",
+          age: "Tuổi",
+          job: "Nghề nghiệp",
+          hobbies: "Sở thích",
+          location: "Nơi ở",
+          other: "Khác"
+        };
+        
+        for (const [key, value] of Object.entries(userProfile)) {
+          const displayKey = fieldNames[key] || key.charAt(0).toUpperCase() + key.slice(1);
+          memoryText += `▪️ ${displayKey}: ${value}\n`;
+        }
+        memoryText += "\n";
+      }
+
+      if (summaries.length > 0) {
+        memoryText += `📝 TÓM TẮT HỘI THOẠI (${activeSummaries.length}/${summaries.length} summaries):\n\n`;
+        activeSummaries.forEach((s, i) => {
+          memoryText += `${i + 1}. [Tin ${s.start}-${s.end}] ${s.content}\n\n`;
+        });
+      } else {
+        memoryText += "📝 Chưa có tóm tắt hội thoại nào.\n";
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: memoryText,
+        userId: userId,
+        conversationId: finalConversationId
+      });
     }
-    memoryText += "\n";
-  }
 
-  // Hiển thị summaries
-  if (summaries.length > 0) {
-    memoryText += `📝 TÓM TẮT HỘI THOẠI (${activeSummaries.length}/${summaries.length} summaries):\n\n`;
-    activeSummaries.forEach((s, i) => {
-      memoryText += `${i + 1}. [Tin ${s.start}-${s.end}] ${s.content}\n\n`;
-    });
-  } else {
-    memoryText += "📝 Chưa có tóm tắt hội thoại nào.\n";
-  }
-
-  return res.status(200).json({
-    success: true,
-    message: memoryText,
-    userId: userId,
-    conversationId: finalConversationId
-  });
-}
     if (API_KEYS.length === 0) {
       return res.status(500).json({ 
         success: false,
@@ -1017,7 +1011,7 @@ if (message === '/memory') {
     let allSummaries = [];
     let activeSummaries = [];
     
-    if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
+    if (conversationHistory.length >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
       allSummaries = await getSummaries(userId, finalConversationId);
       activeSummaries = getActiveSummaries(allSummaries);
       
@@ -1072,24 +1066,24 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
       content: assistantMessage
     });
 
-    // ✅ SAVE với circular buffer
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
     // Cache response
     responseCache.set(responseCacheKey, assistantMessage);
 
-    // ✅ BACKGROUND: Update summaries (mỗi 40 tin)
-    if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
-      const shouldCreateSummary = conversationHistory.length % MEMORY_CONFIG.SUMMARY_INTERVAL === 0;
+    // ✅ BACKGROUND: Update summaries - FIXED
+    if (conversationHistory.length >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
+      const expectedSummaries = Math.floor(conversationHistory.length / MEMORY_CONFIG.SUMMARY_INTERVAL);
+      const currentSummaries = allSummaries.length;
       
-      if (shouldCreateSummary) {
-        console.log(`📝 Background summary creation triggered...`);
+      if (currentSummaries < expectedSummaries) {
+        console.log(`📝 Background summary creation triggered (need ${expectedSummaries}, have ${currentSummaries})...`);
         
         callTempGroqWithRetry(userId, async (groq) => {
           await updateSummaries(userId, finalConversationId, conversationHistory, groq);
           return true;
         })
-          .then(() => console.log(`✅ Summary updated`))
+          .then(() => console.log(`✅ Summary updated in background`))
           .catch(err => console.error('Background summary error:', err));
       }
     }
