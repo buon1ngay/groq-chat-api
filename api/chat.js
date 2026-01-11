@@ -828,77 +828,96 @@ export default async function handler(req, res) {
 
     const finalConversationId = conversationId || 'default';
 
-    // ✅ COMMAND: /history
-    if (message === '/history') {
-      const conversationHistory = await getShortTermMemory(userId, finalConversationId);
-      
-      if (conversationHistory.length === 0) {
-        return res.status(200).json({
-          success: true,
-          message: "📭 Chưa có lịch sử chat nào.",
-          userId: userId,
-          conversationId: finalConversationId
-        });
-      }
+// ✅ COMMAND: /history
+if (message === '/history') {
+  const conversationHistory = await getShortTermMemory(userId, finalConversationId);
+  
+  if (conversationHistory.length === 0) {
+    return res.status(200).json({
+      success: true,
+      message: "📭 Chưa có lịch sử chat nào.",
+      userId: userId,
+      conversationId: finalConversationId
+    });
+  }
 
-      let historyText = "🕘 LỊCH SỬ CHAT\n\n";
-      const recentMessages = conversationHistory.slice(-40);
-      
-      recentMessages.forEach((msg) => {
-        if (msg.role === 'user') {
-          historyText += `👤 Bạn: ${msg.content}\n\n`;
-        } else if (msg.role === 'assistant') {
-          historyText += `🤖 Kami: ${msg.content}\n\n`;
-        }
-      });
-
-      historyText += `\n📊 Tổng cộng: ${Math.min(40, conversationHistory.length)} tin cuối/${conversationHistory.length} tin nhắn`;
-
-      return res.status(200).json({
-        success: true,
-        message: historyText,
-        userId: userId,
-        conversationId: finalConversationId
-      });
+  let historyText = "🕘 LỊCH SỬ CHAT\n\n";
+  
+  // ✅ Lấy 50 tin mới nhất thay vì 40 (chuẩn hơn)
+  const recentMessages = conversationHistory.slice(-50);
+  
+  recentMessages.forEach((msg) => {
+    if (msg.role === 'user') {
+      historyText += `👤 >>>BẠN: ${msg.content}\n\n`;
+    } else if (msg.role === 'assistant') {
+      historyText += `🤖 >>>KAMI: ${msg.content}\n\n`;
     }
+  });
 
+  historyText += `📊 Hiển thị: ${recentMessages.length}/${conversationHistory.length} tin nhắn`;
+
+  return res.status(200).json({
+    success: true,
+    message: historyText,
+    userId: userId,
+    conversationId: finalConversationId,
+    stats: {
+      totalMessages: conversationHistory.length,
+      displayedMessages: recentMessages.length,
+      maxHistoryMessages: MEMORY_CONFIG.MAX_HISTORY_MESSAGES
+    }
+  });
+}
     // ✅ COMMAND: /memory
-    if (message === '/memory') {
-      const userProfile = await getLongTermMemory(userId);
-      const summaries = await getSummaries(userId, finalConversationId);
-      const activeSummaries = getActiveSummaries(summaries);
+if (message === '/memory') {
+  const userProfile = await getLongTermMemory(userId);
+  const summaries = await getSummaries(userId, finalConversationId);
+  
+  // ✅ Lấy 12 summaries mới nhất
+  const activeSummaries = summaries.slice(-MEMORY_CONFIG.ACTIVE_SUMMARIES);
 
-      let memoryText = "🧠 BỘ NHỚ AI\n\n";
+  let memoryText = "🧠 BỘ NHỚ AI\n\n";
 
-      if (Object.keys(userProfile).length === 0) {
-        memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
-      } else {
-        memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
-        const fieldNames = {
-          name: "Tên",
-          nickname: "Biệt danh",
-          family: "Gia đình",
-          age: "Tuổi",
-          job: "Nghề nghiệp",
-          hobbies: "Sở thích",
-          location: "Nơi ở",
-          other: "Khác"
-        };
-        
-        for (const [key, value] of Object.entries(userProfile)) {
-          const displayKey = fieldNames[key] || key.charAt(0).toUpperCase() + key.slice(1);
-          memoryText += `▪️ ${displayKey}: ${value}\n`;
-        }
-        memoryText += "\n";
-      }
+  // Hiển thị thông tin cá nhân
+  if (Object.keys(userProfile).length === 0) {
+    memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
+  } else {
+    memoryText += "👤 THÔNG TIN CÁ NHÂN:\n";
+    const fieldNames = {
+      name: "Tên",
+      nickname: "Biệt danh",
+      family: "Gia đình",
+      age: "Tuổi",
+      job: "Nghề nghiệp",
+      hobbies: "Sở thích",
+      location: "Nơi ở",
+      other: "Khác"
+    };
+    
+    for (const [key, value] of Object.entries(userProfile)) {
+      const displayKey = fieldNames[key] || key.charAt(0).toUpperCase() + key.slice(1);
+      memoryText += `▪️ ${displayKey}: ${value}\n`;
+    }
+    memoryText += "\n";
+  }
 
-      if (summaries.length > 0) {
-        memoryText += `📝 TÓM TẮT HỘI THOẠI (${activeSummaries.length}/${summaries.length} summaries):\n`;
-        activeSummaries.forEach((s, i) => {
-          memoryText += `${i + 1}. [Tin ${s.start}-${s.end}] ${s.content}\n`;
-        });
-      }
+  // Hiển thị summaries
+  if (summaries.length > 0) {
+    memoryText += `📝 TÓM TẮT HỘI THOẠI (${activeSummaries.length}/${summaries.length} summaries):\n\n`;
+    activeSummaries.forEach((s, i) => {
+      memoryText += `${i + 1}. [Tin ${s.start}-${s.end}] ${s.content}\n\n`;
+    });
+  } else {
+    memoryText += "📝 Chưa có tóm tắt hội thoại nào.\n";
+  }
 
+  return res.status(200).json({
+    success: true,
+    message: memoryText,
+    userId: userId,
+    conversationId: finalConversationId
+  });
+}
       return res.status(200).json({
         success: true,
         message: memoryText,
