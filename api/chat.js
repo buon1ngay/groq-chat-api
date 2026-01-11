@@ -815,8 +815,6 @@ export default async function handler(req, res) {
     }
 
     const finalConversationId = conversationId || 'default';
-
-    // ✅ Command /history - CHỈ hiển thị tin nhắn thực tế
     if (message === '/history') {
       const conversationHistory = await getShortTermMemory(userId, finalConversationId);
       
@@ -830,20 +828,15 @@ export default async function handler(req, res) {
       }
 
       let historyText = "🕘 LỊCH SỬ CHAT\n\n";
-      
-      // Hiển thị 40 tin nhắn mới nhất
-      const recentMessages = conversationHistory.slice(-40);
-      
+      const recentMessages = conversationHistory.slice(-40);      
       recentMessages.forEach((msg) => {
         if (msg.role === 'user') {
-          historyText += `👤 BẠN: ${msg.content}\n`;
+          historyText += `>>👤 BẠN: ${msg.content}\n`;
         } else if (msg.role === 'assistant') {
-          historyText += `🤖 KAMI: ${msg.content}\n\n\n`;
+          historyText += `>>🤖 KAMI: ${msg.content}\n\n\n`;
         }
       });
-
       historyText += `\n📊 Tổng cộng: ${conversationHistory.length} tin nhắn (hiển thị 40 mới nhất)`;
-
       return res.status(200).json({
         success: true,
         message: historyText,
@@ -851,8 +844,6 @@ export default async function handler(req, res) {
         conversationId: finalConversationId
       });
     }
-
-    // ✅ Command /memory - Thông tin cá nhân + Summaries
     if (message === '/memory') {
       const userProfile = await getLongTermMemory(userId);
       const summaries = await getSummaries(userId, finalConversationId);
@@ -883,10 +874,15 @@ export default async function handler(req, res) {
 
       if (summaries.length > 0) {
         memoryText += "📝 TÓM TẮT CÁC CUỘC HỘI THOẠI:\n";
-        summaries.forEach((summary) => {
+        
+        // Giới hạn hiển thị 15 summaries mới nhất
+        const recentSummaries = summaries.slice(-15);
+        
+        recentSummaries.forEach((summary) => {
           memoryText += `\n[Phần ${summary.number}] Tin ${summary.messageRange}:\n${summary.content}\n`;
         });
-        memoryText += `\n📊 Tổng: ${summaries.length} tóm tắt`;
+        
+        memoryText += `\n📊 Tổng: ${summaries.length} tóm tắt (hiển thị 15 mới nhất)`;
       } else {
         memoryText += "📭 Chưa có tóm tắt nào (cần >= 40 tin nhắn).";
       }
@@ -1029,6 +1025,7 @@ ${JSON.stringify(searchResult, null, 2)}
 
 💾 Context: ${context.contextInfo.messagesInContext} tin mới + ${context.contextInfo.summariesInContext} summaries
 📊 Tổng: ${context.contextInfo.totalMessages} tin, ${context.contextInfo.totalSummaries} summaries
+
 Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
     };
 
@@ -1130,11 +1127,9 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
         cached: false
       }
     });
-
   } catch (error) {
     console.error('❌ Error:', error);
-    console.error('Error stack:', error.stack);
-    
+    console.error('Error stack:', error.stack);    
     return res.status(500).json({
       success: false,
       error: error.message || 'Internal server error',
