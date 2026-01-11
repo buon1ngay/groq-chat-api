@@ -816,12 +816,11 @@ export default async function handler(req, res) {
 
     const finalConversationId = conversationId || 'default';
 
-    // ✅ SỬA: Command /history - hiển thị summaries + tin nhắn
+    // ✅ Command /history - CHỈ hiển thị tin nhắn thực tế
     if (message === '/history') {
       const conversationHistory = await getShortTermMemory(userId, finalConversationId);
-      const summaries = await getSummaries(userId, finalConversationId);
       
-      if (conversationHistory.length === 0 && summaries.length === 0) {
+      if (conversationHistory.length === 0) {
         return res.status(200).json({
           success: true,
           message: "📭 Chưa có lịch sử chat nào.",
@@ -832,29 +831,18 @@ export default async function handler(req, res) {
 
       let historyText = "🕘 LỊCH SỬ CHAT\n\n";
       
-      // Hiển thị summaries nếu có
-      if (summaries.length > 0) {
-        historyText += "📚 CÁC TÓM TẮT:\n";
-        summaries.forEach((summary) => {
-          historyText += `\n📝 Tóm tắt ${summary.number} (Tin ${summary.messageRange}):\n`;
-          historyText += `${summary.content}\n`;
-        });
-        historyText += "\n" + "─".repeat(50) + "\n\n";
-      }
-      
       // Hiển thị 40 tin nhắn mới nhất
-      historyText += "💬 TIN NHẮN GÂN ĐÂY:\n\n";
       const recentMessages = conversationHistory.slice(-40);
       
       recentMessages.forEach((msg) => {
         if (msg.role === 'user') {
-          historyText += `👤 Bạn: ${msg.content}\n\n`;
+          historyText += `👤 BẠN: ${msg.content}\n`;
         } else if (msg.role === 'assistant') {
-          historyText += `🤖 Kami: ${msg.content}\n\n`;
+          historyText += `🤖 KAMI: ${msg.content}\n\n\n`;
         }
       });
 
-      historyText += `\n📊 Thống kê: ${summaries.length} tóm tắt | ${conversationHistory.length} tin nhắn (hiển thị 40 mới nhất)`;
+      historyText += `\n📊 Tổng cộng: ${conversationHistory.length} tin nhắn (hiển thị 40 mới nhất)`;
 
       return res.status(200).json({
         success: true,
@@ -864,7 +852,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // ✅ SỬA: Command /memory - hiển thị profile + summaries
+    // ✅ Command /memory - Thông tin cá nhân + Summaries
     if (message === '/memory') {
       const userProfile = await getLongTermMemory(userId);
       const summaries = await getSummaries(userId, finalConversationId);
@@ -1041,7 +1029,6 @@ ${JSON.stringify(searchResult, null, 2)}
 
 💾 Context: ${context.contextInfo.messagesInContext} tin mới + ${context.contextInfo.summariesInContext} summaries
 📊 Tổng: ${context.contextInfo.totalMessages} tin, ${context.contextInfo.totalSummaries} summaries
-
 Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
     };
 
