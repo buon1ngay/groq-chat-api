@@ -544,15 +544,16 @@ async function createSummary(groq, messages, startIndex, endIndex) {
 async function updateSummaries(userId, conversationId, conversationHistory, groq) {
   const totalMessages = conversationHistory.length;
   
-  if (totalMessages < MEMORY_CONFIG.SUMMARY_THRESHOLD) {
-    console.log(`⏭️ Chưa đủ tin để tạo summary (${totalMessages}/${MEMORY_CONFIG.SUMMARY_THRESHOLD})`);
-    return [];
-  }
-  
+  // Load summaries hiện có
   const summaries = await getSummaries(userId, conversationId);
   
-  // ✅ SỬA: Tính đúng số summaries cần có
-  // Ví dụ: 120 tin → floor(120/40) = 3 summaries
+  // Nếu chưa đủ tin, trả về summaries hiện có
+  if (totalMessages < MEMORY_CONFIG.SUMMARY_THRESHOLD) {
+    console.log(`⏭️ Chưa đủ tin để tạo summary (${totalMessages}/${MEMORY_CONFIG.SUMMARY_THRESHOLD})`);
+    return summaries;
+  }
+  
+  // ✅ Tính đúng số summaries cần có
   const expectedSummaries = Math.floor(totalMessages / MEMORY_CONFIG.SUMMARY_INTERVAL);
   const currentSummaries = summaries.length;
   
@@ -571,7 +572,6 @@ async function updateSummaries(userId, conversationId, conversationHistory, groq
     
     console.log(`📝 Summarizing messages ${startIndex}-${endIndex - 1} (${messagesToSummarize.length} msgs)...`);
     
-    // ✅ SỬA: endIndex - 1 vì slice không bao gồm endIndex
     const summary = await createSummary(groq, messagesToSummarize, startIndex, endIndex - 1);
     
     if (summary) {
@@ -844,9 +844,9 @@ export default async function handler(req, res) {
       
       recentMessages.forEach((msg) => {
         if (msg.role === 'user') {
-          historyText += `👤 >>>BẠN: ${msg.content}\n`;
+          historyText += `👤 **BẠN:** ${msg.content}\n\n`;
         } else if (msg.role === 'assistant') {
-          historyText += `🤖 >>>KAMI: ${msg.content}\n\n\n`;
+          historyText += `🤖 **KAMI:** ${msg.content}\n\n`;
         }
       });
 
@@ -1007,14 +1007,12 @@ export default async function handler(req, res) {
       content: message.trim()
     });
 
-    // ✅ SUMMARIES: Load và lấy active summaries
-    let allSummaries = [];
+    // ✅ SUMMARIES: LUÔN load summaries (không cần check threshold)
+    let allSummaries = await getSummaries(userId, finalConversationId);
     let activeSummaries = [];
     
-    if (conversationHistory.length >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
-      allSummaries = await getSummaries(userId, finalConversationId);
+    if (allSummaries.length > 0) {
       activeSummaries = getActiveSummaries(allSummaries);
-      
       console.log(`📝 Summaries: ${activeSummaries.length}/${allSummaries.length} active`);
     }
 
