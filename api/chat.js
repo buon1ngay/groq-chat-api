@@ -79,17 +79,21 @@ const API_KEYS = [
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
+// ✅ CẬP NHẬT: Cấu hình bộ nhớ mới
 const MEMORY_CONFIG = {
   SHORT_TERM_DAYS: 15,
-  WORKING_MEMORY_LIMIT: 30,
+  WORKING_MEMORY_LIMIT: 30,           // Giữ 30 tin mới nhất làm context
   LONG_TERM_DAYS: 365,
-  SUMMARY_THRESHOLD: 40
+  SUMMARY_THRESHOLD: 40,              // Tóm tắt sau mỗi 40 tin
+  MAX_SUMMARIES: 30,                  // Giữ tối đa 30 summaries
+  MAX_MESSAGES: 1000,                 // Giữ tối đa 1000 tin nhắn
+  SUMMARY_CONTEXT_LIMIT: 15           // Lấy 15 summaries mới nhất làm context
 };
 
 const DETECTION_PATTERNS = {
   never: /^(chào|hello|hi|xin chào|hey|cảm ơn|thank|thanks|tạm biệt|bye|goodbye|ok|okay|được|rồi|ừ|uhm)$/i,
   explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp)/i,
-  realtime: /(giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay)/i,
+  realtime: /(giá|giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay)/i,
   current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang|ai là|là ai)/i,
   concept: /^.*(là gì|nghĩa là gì|định nghĩa|ý nghĩa|giải thích|cho.*biết về|nói về)/i,
   advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i
@@ -384,7 +388,6 @@ async function shouldSearch(message, groq) {
   }
 }
 
-// ✅ SỬA: Sequential fallback - Wikipedia → Serper → Tavily
 async function smartSearch(query, searchType) {
   const cacheKey = normalizeForCache(query);
   
@@ -397,7 +400,6 @@ async function smartSearch(query, searchType) {
   console.log(`🔍 Search type: ${searchType}`);
   let result = null;
 
-  // Ưu tiên 1: Wikipedia (miễn phí, ổn định)
   console.log(`🔍 Trying Wikipedia...`);
   result = await searchWikipedia(query);
   if (result) {
@@ -407,7 +409,6 @@ async function smartSearch(query, searchType) {
   }
   console.log(`❌ Wikipedia failed`);
 
-  // Ưu tiên 2: Serper (nếu có API key)
   if (SERPER_API_KEY) {
     console.log(`🔍 Trying Serper...`);
     result = await searchSerper(query);
@@ -419,7 +420,6 @@ async function smartSearch(query, searchType) {
     console.log(`❌ Serper failed`);
   }
 
-  // Ưu tiên 3: Tavily (fallback cuối)
   if (TAVILY_API_KEY) {
     console.log(`🔍 Trying Tavily...`);
     result = await searchTavily(query);
@@ -479,45 +479,125 @@ async function saveLongTermMemory(userId, profileData) {
   await setHashData(key, profileData, MEMORY_CONFIG.LONG_TERM_DAYS * 86400);
 }
 
-async function getSummary(userId, conversationId) {
-  const key = `summary:${userId}:${conversationId}`;
-  const summary = await getData(key);
+// ✅ MỚI: Lấy danh sách summaries
+async function getSummaries(userId, conversationId) {
+  const key = `summaries:${userId}:${conversationId}`;
+  const data = await getData(key);
   
-  if (summary) {
-    await setExpire(key, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
+  if (!data) return [];
+  
+  try {
+    const summaries = typeof data === 'string' ? JSON.parse(data) : data;
+    return Array.isArray(summaries) ? summaries : [];
+  } catch (error) {
+    console.error('Failed to parse summaries:', error);
+    return [];
   }
-  
-  return summary || '';
 }
 
-async function saveSummary(userId, conversationId, summary) {
-  const key = `summary:${userId}:${conversationId}`;
-  await setData(key, summary, MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
+// ✅ MỚI: Lưu danh sách summaries
+async function saveSummaries(userId, conversationId, summaries) {
+  const key = `summaries:${userId}:${conversationId}`;
+  await setData(key, JSON.stringify(summaries), MEMORY_CONFIG.SHORT_TERM_DAYS * 86400);
 }
 
-async function summarizeOldMessages(groq, oldMessages) {
+// ✅ XÓA: Không cần nữa
+// async function getSummary(userId, conversationId) {...}
+// async function saveSummary(userId, conversationId, summary) {...}
+
+// ✅ MỚI: Tạo summary mới từ 40 tin nhắn
+async function createNewSummary(groq, messages, summaryNumber) {
   try {
     const chatCompletion = await groq.chat.completions.create({
       messages: [
         {
           role: 'system',
-          content: 'Hãy tóm tắt cuộc hội thoại sau thành 2-3 câu ngắn gọn, giữ lại thông tin quan trọng.'
+          content: 'Hãy tóm tắt 40 tin nhắn sau thành 3-4 câu ngắn gọn, giữ lại thông tin quan trọng, sự kiện chính và맥락 cuộc trò chuyện.'
         },
         {
           role: 'user',
-          content: `Tóm tắt cuộc hội thoại:\n${JSON.stringify(oldMessages)}`
+          content: `Tóm tắt phần ${summaryNumber}:\n${JSON.stringify(messages)}`
         }
       ],
       model: 'llama-3.1-8b-instant',
       temperature: 0.3,
-      max_tokens: 300
+      max_tokens: 400
     });
     
     return chatCompletion.choices[0]?.message?.content || '';
   } catch (error) {
-    console.error('Error summarizing:', error);
-    return 'Cuộc trò chuyện trước đó...';
+    console.error('Error creating summary:', error);
+    return `[Summary ${summaryNumber}] Cuộc trò chuyện tiếp diễn...`;
   }
+}
+
+// ✅ THAY THẾ: Hàm summarizeOldMessages cũ
+async function summarizeOldMessages(groq, oldMessages) {
+  return await createNewSummary(groq, oldMessages, 1);
+}
+
+// ✅ MỚI: Quản lý bộ nhớ tự động
+async function manageMemory(userId, conversationId, conversationHistory, groq) {
+  const totalMessages = conversationHistory.length;
+  
+  // 1️⃣ QUẢN LÝ TIN NHẮN: Giữ tối đa 1000 tin
+  if (totalMessages > MEMORY_CONFIG.MAX_MESSAGES) {
+    const messagesToRemove = totalMessages - MEMORY_CONFIG.MAX_MESSAGES;
+    conversationHistory.splice(0, messagesToRemove);
+    console.log(`🗑️ Removed ${messagesToRemove} old messages, keeping ${MEMORY_CONFIG.MAX_MESSAGES}`);
+  }
+  
+  // 2️⃣ QUẢN LÝ SUMMARIES: Tóm tắt mỗi 40 tin
+  const summaries = await getSummaries(userId, conversationId);
+  const messagesProcessed = summaries.length * MEMORY_CONFIG.SUMMARY_THRESHOLD;
+  const unprocessedMessages = totalMessages - messagesProcessed;
+  
+  // Nếu có >= 40 tin chưa tóm tắt, tạo summary mới
+  if (unprocessedMessages >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
+    const startIdx = messagesProcessed;
+    const endIdx = startIdx + MEMORY_CONFIG.SUMMARY_THRESHOLD;
+    const messagesToSummarize = conversationHistory.slice(startIdx, endIdx);
+    
+    const summaryNumber = summaries.length + 1;
+    console.log(`📝 Creating summary ${summaryNumber} from messages ${startIdx}-${endIdx}...`);
+    
+    const newSummary = await createNewSummary(groq, messagesToSummarize, summaryNumber);
+    
+    summaries.push({
+      number: summaryNumber,
+      content: newSummary,
+      messageRange: `${startIdx + 1}-${endIdx}`,
+      createdAt: new Date().toISOString()
+    });
+    
+    // 3️⃣ Giữ tối đa 30 summaries, xóa cũ nhất nếu vượt quá
+    if (summaries.length > MEMORY_CONFIG.MAX_SUMMARIES) {
+      const removed = summaries.shift();
+      console.log(`🗑️ Removed oldest summary #${removed.number}, keeping ${MEMORY_CONFIG.MAX_SUMMARIES}`);
+    }
+    
+    await saveSummaries(userId, conversationId, summaries);
+    console.log(`✅ Summary ${summaryNumber} created. Total summaries: ${summaries.length}`);
+  }
+  
+  return summaries;
+}
+
+// ✅ MỚI: Xây dựng context cho AI
+function buildContext(conversationHistory, summaries) {
+  const recentMessages = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
+  const recentSummaries = summaries.slice(-MEMORY_CONFIG.SUMMARY_CONTEXT_LIMIT);
+  
+  return {
+    recentMessages,
+    recentSummaries,
+    contextInfo: {
+      totalMessages: conversationHistory.length,
+      totalSummaries: summaries.length,
+      messagesInContext: recentMessages.length,
+      summariesInContext: recentSummaries.length
+    }
+  };
 }
 
 async function extractPersonalInfo(groq, conversationHistory) {
@@ -736,10 +816,12 @@ export default async function handler(req, res) {
 
     const finalConversationId = conversationId || 'default';
 
+    // ✅ SỬA: Command /history - hiển thị summaries + tin nhắn
     if (message === '/history') {
       const conversationHistory = await getShortTermMemory(userId, finalConversationId);
+      const summaries = await getSummaries(userId, finalConversationId);
       
-      if (conversationHistory.length === 0) {
+      if (conversationHistory.length === 0 && summaries.length === 0) {
         return res.status(200).json({
           success: true,
           message: "📭 Chưa có lịch sử chat nào.",
@@ -749,6 +831,19 @@ export default async function handler(req, res) {
       }
 
       let historyText = "🕘 LỊCH SỬ CHAT\n\n";
+      
+      // Hiển thị summaries nếu có
+      if (summaries.length > 0) {
+        historyText += "📚 CÁC TÓM TẮT:\n";
+        summaries.forEach((summary) => {
+          historyText += `\n📝 Tóm tắt ${summary.number} (Tin ${summary.messageRange}):\n`;
+          historyText += `${summary.content}\n`;
+        });
+        historyText += "\n" + "─".repeat(50) + "\n\n";
+      }
+      
+      // Hiển thị 40 tin nhắn mới nhất
+      historyText += "💬 TIN NHẮN GÂN ĐÂY:\n\n";
       const recentMessages = conversationHistory.slice(-40);
       
       recentMessages.forEach((msg) => {
@@ -759,7 +854,7 @@ export default async function handler(req, res) {
         }
       });
 
-      historyText += `\n📊 Tổng cộng: 40 tin cuối/${conversationHistory.length} tin nhắn`;
+      historyText += `\n📊 Thống kê: ${summaries.length} tóm tắt | ${conversationHistory.length} tin nhắn (hiển thị 40 mới nhất)`;
 
       return res.status(200).json({
         success: true,
@@ -769,9 +864,10 @@ export default async function handler(req, res) {
       });
     }
 
+    // ✅ SỬA: Command /memory - hiển thị profile + summaries
     if (message === '/memory') {
       const userProfile = await getLongTermMemory(userId);
-      const summary = await getSummary(userId, finalConversationId);
+      const summaries = await getSummaries(userId, finalConversationId);
 
       let memoryText = "🧠 BỘ NHỚ AI\n\n";
 
@@ -797,9 +893,14 @@ export default async function handler(req, res) {
         memoryText += "\n";
       }
 
-      if (summary) {
-        memoryText += "📝 TÓM TẮT HỘI THOẠI:\n";
-        memoryText += summary;
+      if (summaries.length > 0) {
+        memoryText += "📝 TÓM TẮT CÁC CUỘC HỘI THOẠI:\n";
+        summaries.forEach((summary) => {
+          memoryText += `\n[Phần ${summary.number}] Tin ${summary.messageRange}:\n${summary.content}\n`;
+        });
+        memoryText += `\n📊 Tổng: ${summaries.length} tóm tắt`;
+      } else {
+        memoryText += "📭 Chưa có tóm tắt nào (cần >= 40 tin nhắn).";
       }
 
       return res.status(200).json({
@@ -900,26 +1001,21 @@ export default async function handler(req, res) {
       content: message.trim()
     });
 
-    let workingMemory = conversationHistory;
-    let existingSummary = null;
+    // ✅ THAY THẾ: Logic bộ nhớ mới
+    const apiKey = API_KEYS[await getUserKeyIndex(userId)];
+    const tempGroq = new Groq({ apiKey });
     
-    if (conversationHistory.length > MEMORY_CONFIG.SUMMARY_THRESHOLD) {
-      existingSummary = await getSummary(userId, finalConversationId);
-      
-      const oldMessages = conversationHistory.slice(0, -MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
-      workingMemory = conversationHistory.slice(-MEMORY_CONFIG.WORKING_MEMORY_LIMIT);
-      
-      if (!existingSummary) {
-        console.log(`📝 Background summarizing...`);
-        
-        callTempGroqWithRetry(userId, async (groq) => {
-          const summary = await summarizeOldMessages(groq, oldMessages);
-          await saveSummary(userId, finalConversationId, summary);
-          return summary;
-        })
-          .then(() => console.log(`✅ Summary created`))
-          .catch(err => console.error('Background summary error:', err));
-      }
+    const summaries = await manageMemory(userId, finalConversationId, conversationHistory, tempGroq);
+    const context = buildContext(conversationHistory, summaries);
+    
+    const workingMemory = context.recentMessages;
+    
+    let summaryContext = '';
+    if (context.recentSummaries.length > 0) {
+      summaryContext = '\n📚 TÓM TẮT CÁC CUỘC TRÒ CHUYỆN TRƯỚC:\n';
+      context.recentSummaries.forEach(s => {
+        summaryContext += `\n[Phần ${s.number}] (Tin ${s.messageRange}):\n${s.content}\n`;
+      });
     }
 
     const currentDate = new Date().toLocaleDateString('vi-VN', {
@@ -937,11 +1033,14 @@ ${Object.keys(userProfile).length > 0 ? `
 👤 THÔNG TIN NGƯỜI DÙNG:
 ${Object.entries(userProfile).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
 ` : ''}
-${existingSummary ? `📝 TÓM TẮT TRƯỚC:\n${existingSummary}\n` : ''}
+${summaryContext}
 ${searchResult ? `
 🔍 KẾT QUẢ TÌM KIẾM (dùng thông tin này để trả lời):
 ${JSON.stringify(searchResult, null, 2)}
 ` : ''}
+
+💾 Context: ${context.contextInfo.messagesInContext} tin mới + ${context.contextInfo.summariesInContext} summaries
+📊 Tổng: ${context.contextInfo.totalMessages} tin, ${context.contextInfo.totalSummaries} summaries
 
 Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
     };
@@ -1035,7 +1134,8 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
       stats: {
         totalMessages: conversationHistory.length,
         workingMemorySize: workingMemory.length,
-        hasSummary: !!existingSummary,
+        summariesCount: summaries.length,
+        summariesInContext: context.contextInfo.summariesInContext,
         userProfileFields: Object.keys(userProfile).length,
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
