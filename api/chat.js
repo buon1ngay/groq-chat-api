@@ -918,14 +918,6 @@ if (message === '/memory') {
     conversationId: finalConversationId
   });
 }
-      return res.status(200).json({
-        success: true,
-        message: memoryText,
-        userId: userId,
-        conversationId: finalConversationId
-      });
-    }
-
     if (API_KEYS.length === 0) {
       return res.status(500).json({ 
         success: false,
