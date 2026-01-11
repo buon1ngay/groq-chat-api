@@ -1069,20 +1069,21 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
     // Cache response
     responseCache.set(responseCacheKey, assistantMessage);
 
-    // ✅ BACKGROUND: Update summaries - FIXED
+    // ✅ FOREGROUND: Update summaries NGAY LẬP TỨC
     if (conversationHistory.length >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
       const expectedSummaries = Math.floor(conversationHistory.length / MEMORY_CONFIG.SUMMARY_INTERVAL);
       const currentSummaries = allSummaries.length;
       
       if (currentSummaries < expectedSummaries) {
-        console.log(`📝 Background summary creation triggered (need ${expectedSummaries}, have ${currentSummaries})...`);
+        console.log(`📝 Creating summary NOW (need ${expectedSummaries}, have ${currentSummaries})...`);
         
-        callTempGroqWithRetry(userId, async (groq) => {
-          await updateSummaries(userId, finalConversationId, conversationHistory, groq);
-          return true;
-        })
-          .then(() => console.log(`✅ Summary updated in background`))
-          .catch(err => console.error('Background summary error:', err));
+        try {
+          // ✅ CHẠY ĐỒNG BỘ - CHỜ XONG MỚI RESPONSE
+          allSummaries = await updateSummaries(userId, finalConversationId, conversationHistory, groq);
+          console.log(`✅ Summary created: ${allSummaries.length} total`);
+        } catch (err) {
+          console.error('Summary creation error:', err);
+        }
       }
     }
 
