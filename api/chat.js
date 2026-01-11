@@ -844,9 +844,9 @@ export default async function handler(req, res) {
       
       recentMessages.forEach((msg) => {
         if (msg.role === 'user') {
-          historyText += `👤 **BẠN:** ${msg.content}\n\n`;
+          historyText += `👤 >>>BẠN: ${msg.content}\n`;
         } else if (msg.role === 'assistant') {
-          historyText += `🤖 **KAMI:** ${msg.content}\n\n`;
+          historyText += `🤖 >>>KAMI: ${msg.content}\n\n\n`;
         }
       });
 
