@@ -1069,24 +1069,23 @@ Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Vi�
     // Cache response
     responseCache.set(responseCacheKey, assistantMessage);
 
-    // ✅ UPDATE SUMMARIES - SYNC BUT SAFE
+    // ✅ BACKGROUND: Update summaries - AN TOÀN
     if (conversationHistory.length >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
       const expectedSummaries = Math.floor(conversationHistory.length / MEMORY_CONFIG.SUMMARY_INTERVAL);
       const currentSummaries = allSummaries.length;
       
       if (currentSummaries < expectedSummaries) {
-        console.log(`📝 Summary needed (${expectedSummaries} expected, ${currentSummaries} current)`);
+        console.log(`📝 Background summary: need ${expectedSummaries}, have ${currentSummaries}`);
         
-        // ✅ Tạo summary NGAY với groq mới
-        try {
-          const tempGroq = new Groq({ apiKey: API_KEYS[await getUserKeyIndex(userId)] });
-          const newSummaries = await updateSummaries(userId, finalConversationId, conversationHistory, tempGroq);
-          allSummaries = newSummaries; // Cập nhật để stats đúng
-          console.log(`✅ Summary created: ${allSummaries.length} total`);
-        } catch (err) {
-          console.error('Summary error:', err.message);
-          // Không block response nếu summary fail
-        }
+        // ✅ BACKGROUND - KHÔNG CHỜ
+        setImmediate(() => {
+          callTempGroqWithRetry(userId, async (groq) => {
+            await updateSummaries(userId, finalConversationId, conversationHistory, groq);
+            return true;
+          })
+            .then(() => console.log(`✅ Background summary done`))
+            .catch(err => console.error('Background summary error:', err));
+        });
       }
     }
 
