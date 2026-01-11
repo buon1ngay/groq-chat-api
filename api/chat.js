@@ -81,16 +81,16 @@ const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 // ✅ CONFIG: Giữ nguyên + thêm circular buffer limits
 const MEMORY_CONFIG = {
-  SHORT_TERM_DAYS: 15,           // TTL: Xóa nếu user không hoạt động 15 ngày
+  SHORT_TERM_DAYS: 30,           // TTL: Xóa nếu user không hoạt động 30 ngày
   WORKING_MEMORY_LIMIT: 30,      // Gửi AI: 30 tin cuối
   LONG_TERM_DAYS: 365,           // Profile: 1 năm
   SUMMARY_THRESHOLD: 40,         // Tóm tắt khi > 40 tin
   
   // ✅ MỚI: Circular buffer limits
-  MAX_HISTORY_MESSAGES: 4000,    // Tối đa 4000 tin
+  MAX_HISTORY_MESSAGES: 2000,    // Tối đa 2000 tin
   SUMMARY_INTERVAL: 40,          // Tóm tắt mỗi 40 tin
-  MAX_SUMMARIES: 100,            // Tối đa 100 summaries
-  ACTIVE_SUMMARIES: 10           // Gửi AI: 10 summaries mới nhất
+  MAX_SUMMARIES: 50,            // Tối đa 50 summaries
+  ACTIVE_SUMMARIES: 12           // Gửi AI: 12 summaries mới nhất
 };
 
 const DETECTION_PATTERNS = {
@@ -519,7 +519,7 @@ async function createSummary(groq, messages, startIndex, endIndex) {
       messages: [
         {
           role: 'system',
-          content: 'Tóm tắt cuộc hội thoại thành 2-3 CÂU NGẮN GỌN (tối đa 50 từ). Chỉ giữ thông tin QUAN TRỌNG NHẤT.'
+          content: 'Tóm tắt cuộc hội thoại thành 3-4 CÂU NGẮN GỌN (tối đa 60 từ). Chỉ giữ thông tin QUAN TRỌNG NHẤT.'
         },
         {
           role: 'user',
