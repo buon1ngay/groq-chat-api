@@ -8,8 +8,8 @@ const app = express();
 app.use(express.json());
 
 // ===== CẤU HÌNH =====
-const BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE'; // Lấy từ @BotFather
-const CHAT_ID = 'YOUR_CHAT_ID_HERE'; // ID chat lưu file
+const BOT_TOKEN = '7889533382:AAH6O5wB1ncikuY5HXwVfpvoUykDptSbI28'; // Lấy từ @BotFather
+const CHAT_ID = '6714157711'; // ID chat lưu file
 const PORT = process.env.PORT || 3000;
 
 const upload = multer({ dest: 'uploads/' });
