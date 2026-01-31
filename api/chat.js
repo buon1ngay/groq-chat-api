@@ -188,7 +188,7 @@ const searchWikipedia = (query) => searchWithRetry(async () => {
       format: 'json'
     },
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; KamiBot/1.0)'
+      'User-Agent': 'Mozilla/5.0 (compatible; Kami/1.0)'
     },
     timeout: 4000
   });
@@ -198,7 +198,7 @@ const searchWikipedia = (query) => searchWithRetry(async () => {
   const summaryUrl = `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pageTitle)}`;
   const summaryResponse = await axios.get(summaryUrl, { 
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; KamiBot/1.0)'
+      'User-Agent': 'Mozilla/5.0 (compatible; Kami/1.0)'
     },
     timeout: 4000 
   });
@@ -744,9 +744,9 @@ export default async function handler(req, res) {
       const recentMessages = conversationHistory.slice(-40); 
       recentMessages.forEach((msg) => {
         if (msg.role === 'user') {
-          historyText += `👤 Bạn: ${msg.content}\n\n`;
+          historyText += `>>>👤 Bạn: ${msg.content}\n\n`;
         } else if (msg.role === 'assistant') {
-          historyText += `🤖 Kami: ${msg.content}\n\n`;
+          historyText += `>>>🤖 Kami: ${msg.content}\n\n\n`;
         }
       });
 
@@ -763,7 +763,6 @@ export default async function handler(req, res) {
       const summaries = await getSummaries(userId, finalConversationId);
 
       let memoryText = "🧠 BỘ NHỚ AI\n\n";
-
       if (Object.keys(userProfile).length === 0) {
         memoryText += "📭 Chưa có thông tin cá nhân nào được lưu.\n\n";
       } else {
@@ -903,7 +902,7 @@ ${JSON.stringify(searchResult, null, 2)}
 ` : ''}
 💾 Context: ${context.contextInfo.messagesInContext} tin mới + ${context.contextInfo.summariesInContext} summaries
 📊 Tổng: ${context.contextInfo.totalMessages} tin, ${context.contextInfo.totalSummaries} summaries
-Hãy trả lời user một cách chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
+Hãy trả lời chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
     };
     const messages = [systemPrompt, ...workingMemory];
     console.log(`🤖 Calling AI with ${workingMemory.length} messages...`);
