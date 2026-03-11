@@ -46,10 +46,7 @@ class SimpleCache {
 }
 const SEARCH_CONFIG = {
   CACHE_TTL_MINUTES: 30,
-  DETECTION_CACHE_TTL_MINUTES: 60,
-  WIKI_CONTENT_CHARS: 4000,   // ký tự tối đa từ Wikipedia full article
-  WIKI_SECTION_CHARS: 800,    // mỗi section bổ sung
-  MAX_SECTIONS: 4             // số section tối đa lấy thêm
+  DETECTION_CACHE_TTL_MINUTES: 60
 };
 const searchCache = new SimpleCache(SEARCH_CONFIG.CACHE_TTL_MINUTES * 60000, 100);
 const detectionCache = new SimpleCache(SEARCH_CONFIG.DETECTION_CACHE_TTL_MINUTES * 60000, 200);
@@ -78,13 +75,11 @@ const MEMORY_CONFIG = {
   SUMMARY_CONTEXT_LIMIT: 15
 };
 const DETECTION_PATTERNS = {
-  never: /^(chào|hello|hi|xin chào|hey|cảm ơn|thank|thanks|tạm biệt|bye|goodbye|ok|okay|được|rồi|ừ|uhm|haha|😂|lol)$/i,
-  explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp|wikipedia|wiki)/i,
-  realtime: /(giá bitcoin|giá vàng|giá dầu|giá usd|tỷ giá|thời tiết|nhiệt độ|dự báo|tin tức mới nhất|tin tức hôm nay|kết quả bóng đá|lịch thi đấu|xổ số)/i,
-  // Câu hỏi factual cần tra cứu — mở rộng nhiều hơn
-  factual: /(là gì|là ai|của ai|do ai|ai phát minh|ai tạo ra|ai viết|ai sáng tác|ai sáng lập|ai đề xuất|sinh năm|mất năm|thành lập|ra đời|được tạo ra|tác giả|đạo diễn|diễn viên|thủ đô|dân số|diện tích|lịch sử|nguồn gốc|xuất xứ|ý nghĩa của|định nghĩa|cho.*biết về|nói về|kể về|giới thiệu về|thông tin về|tiểu sử|sự nghiệp|phát minh|khám phá|lý thuyết|học thuyết|thuyết)/i,
-  current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang xảy ra|ai đang|ai là)/i,
-  concept: /^.*(nghĩa là gì|giải thích|ý nghĩa|khái niệm|nguyên lý|hoạt động như thế nào|cơ chế)/i,
+  never: /^(chào|hello|hi|xin chào|hey|cảm ơn|thank|thanks|tạm biệt|bye|goodbye|ok|okay|được|rồi|ừ|uhm)$/i,
+  explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp)/i,
+  realtime: /(giá|giá bitcoin|giá vàng|giá dầu|tỷ giá|thời tiết|nhiệt độ|tin tức mới nhất|tin tức hôm nay)/i,
+  current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang|ai là|là ai)/i,
+  concept: /^.*(là gì|nghĩa là gì|định nghĩa|ý nghĩa|giải thích|cho.*biết về|nói về)/i,
   advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i
 };
 const IS_DEV = process.env.NODE_ENV === 'development';
@@ -123,14 +118,7 @@ async function getData(key) {
 }
 async function setHashData(key, data, ttl = null) {
   if (redis) {
-    // Upstash chỉ chấp nhận string values — serialize tất cả
-    const flat = {};
-    for (const [k, v] of Object.entries(data)) {
-      if (v === null || v === undefined) continue;
-      flat[k] = typeof v === 'string' ? v : JSON.stringify(v);
-    }
-    if (Object.keys(flat).length === 0) return true;
-    await redis.hset(key, flat);
+    await redis.hset(key, data);
     if (ttl) await redis.expire(key, ttl);
     return true;
   } else {
@@ -140,20 +128,7 @@ async function setHashData(key, data, ttl = null) {
 }
 async function getHashData(key) {
   if (redis) {
-    const raw = await redis.hgetall(key);
-    if (!raw) return {};
-    // Thử parse lại những value đã serialize
-    const result = {};
-    for (const [k, v] of Object.entries(raw)) {
-      try {
-        result[k] = (typeof v === 'string' && (v.startsWith('{') || v.startsWith('[')))
-          ? JSON.parse(v)
-          : v;
-      } catch {
-        result[k] = v;
-      }
-    }
-    return result;
+    return await redis.hgetall(key);
   } else {
     const item = memoryStore.get(key);
     if (!item) return {};
@@ -203,106 +178,36 @@ async function searchWithRetry(searchFn, name) {
     return null;
   }
 }
-// ── Wikipedia nâng cấp: lấy full article thay vì chỉ summary ──
 const searchWikipedia = (query) => searchWithRetry(async () => {
-  const HEADERS = { 'User-Agent': 'Mozilla/5.0 (compatible; Kami/1.0)' };
-  const BASE = 'https://vi.wikipedia.org/w/api.php';
-
-  // Bước 1: Tìm title phù hợp nhất (thử tiếng Việt trước)
-  const searchResp = await axios.get(BASE, {
-    params: { action: 'opensearch', search: query, limit: 5, format: 'json' },
-    headers: HEADERS,
-    timeout: 5000
-  });
-  let titles = searchResp.data[1] || [];
-
-  // Nếu không có kết quả tiếng Việt, thử English Wikipedia
-  let lang = 'vi';
-  if (titles.length === 0) {
-    const enResp = await axios.get('https://en.wikipedia.org/w/api.php', {
-      params: { action: 'opensearch', search: query, limit: 3, format: 'json' },
-      headers: HEADERS,
-      timeout: 5000
-    });
-    titles = enResp.data[1] || [];
-    lang = 'en';
-    if (titles.length === 0) return null;
-  }
-
-  const pageTitle = titles[0];
-  const wikiBase = `https://${lang}.wikipedia.org/w/api.php`;
-
-  // Bước 2: Lấy full article text (extract toàn bộ, không chỉ intro)
-  const fullResp = await axios.get(wikiBase, {
+  const searchUrl = 'https://vi.wikipedia.org/w/api.php';
+  const searchResponse = await axios.get(searchUrl, {
     params: {
-      action: 'query',
-      titles: pageTitle,
-      prop: 'extracts|info|categories',
-      exintro: false,        // lấy TOÀN BỘ, không chỉ intro
-      explaintext: true,     // text thuần, không HTML
-      inprop: 'url',
-      format: 'json',
-      redirects: 1
+      action: 'opensearch',
+      search: query,
+      limit: 3,
+      format: 'json'
     },
-    headers: HEADERS,
-    timeout: 6000
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; Kami/1.0)'
+    },
+    timeout: 4000
   });
-
-  const pages = fullResp.data.query?.pages || {};
-  const pageId = Object.keys(pages)[0];
-  if (!pageId || pageId === '-1') return null;
-
-  const page = pages[pageId];
-  const rawText = page.extract || '';
-  if (!rawText || rawText.length < 50) return null;
-
-  // Bước 3: Xử lý và chia section thông minh
-  // Tách thành các đoạn, bỏ dòng trống thừa
-  const lines = rawText.split('\n').filter(l => l.trim().length > 0);
-  
-  // Lấy phần intro (trước section đầu tiên == dòng toàn uppercase/ngắn)
-  let introLines = [];
-  let sectionLines = [];
-  let inIntro = true;
-  
-  for (const line of lines) {
-    // Detect section header: dòng ngắn < 60 ký tự, không có dấu chấm ở cuối
-    const isHeader = line.trim().length < 60 && !line.trim().endsWith('.') && !line.trim().endsWith(',');
-    if (inIntro && isHeader && introLines.length > 3) {
-      inIntro = false;
-    }
-    if (inIntro) {
-      introLines.push(line);
-    } else {
-      sectionLines.push(line);
-    }
-  }
-
-  // Build content: intro đầy đủ + các section quan trọng
-  const introText = introLines.join('\n').substring(0, SEARCH_CONFIG.WIKI_CONTENT_CHARS);
-  
-  // Lấy thêm nội dung section (ưu tiên section đầu)
-  let extraText = '';
-  if (sectionLines.length > 0) {
-    extraText = '\n\n' + sectionLines
-      .join('\n')
-      .substring(0, SEARCH_CONFIG.WIKI_SECTION_CHARS * SEARCH_CONFIG.MAX_SECTIONS);
-  }
-
-  const fullContent = (introText + extraText).trim();
-
-  // Bước 4: Lấy URL trang
-  const pageUrl = page.fullurl || 
-    `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(pageTitle.replace(/ /g, '_'))}`;
-
-  console.log(`📖 Wikipedia: "${pageTitle}" (${lang}) — ${fullContent.length} chars`);
-
+  const titles = searchResponse.data[1];
+  if (!titles || titles.length === 0) return null;
+  const pageTitle = titles[0];
+  const summaryUrl = `https://vi.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pageTitle)}`;
+  const summaryResponse = await axios.get(summaryUrl, { 
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; Kami/1.0)'
+    },
+    timeout: 4000 
+  });
+  const data = summaryResponse.data;
   return {
-    source: `Wikipedia (${lang})`,
-    title: page.title || pageTitle,
-    content: fullContent,
-    url: pageUrl,
-    chars: fullContent.length
+    source: 'Wikipedia',
+    title: data.title,
+    content: data.extract,
+    url: data.content_urls.desktop.page
   };
 }, 'Wikipedia');
 const searchSerper = (query) => {
@@ -322,14 +227,9 @@ const searchSerper = (query) => {
     });
     const results = response.data.organic || [];
     if (results.length === 0) return null;
-    const answerBox = response.data.answerBox;
-    const knowledgeGraph = response.data.knowledgeGraph;
-    const topAnswer = answerBox?.answer || answerBox?.snippet || knowledgeGraph?.description || null;
     return {
-      source: 'Serper (Google)',
-      title: knowledgeGraph?.title || results[0]?.title || null,
-      content: topAnswer,  // answer box nếu có
-      results: results.slice(0, 5).map(r => ({
+      source: 'Serper',
+      results: results.map(r => ({
         title: r.title,
         content: r.snippet,
         url: r.link
@@ -343,73 +243,49 @@ const searchTavily = (query) => {
     const response = await axios.post('https://api.tavily.com/search', {
       api_key: TAVILY_API_KEY,
       query: query,
-      search_depth: 'advanced',   // lấy nội dung sâu hơn
+      search_depth: 'basic',
       include_answer: true,
-      include_raw_content: false,
-      max_results: 5
+      max_results: 3
     }, {
-      timeout: 7000
+      timeout: 4000
     });
     const data = response.data;
     return {
       source: 'Tavily',
-      content: data.answer || null,
-      results: data.results?.slice(0, 4).map(r => ({
+      content: data.answer,
+      results: data.results?.map(r => ({
         title: r.title,
-        content: r.content?.substring(0, 600) || r.snippet || '',
-        url: r.url,
-        score: r.score
-      })).sort((a, b) => (b.score || 0) - (a.score || 0))  // sắp xếp theo relevance
+        content: r.content,
+        url: r.url
+      }))
     };
   }, 'Tavily');
 };
 function quickDetect(message) {
   const lower = message.toLowerCase().trim();
-
-  // Chắc chắn không cần search
   if (DETECTION_PATTERNS.never.test(lower)) {
     return { needsSearch: false, confidence: 1.0, reason: 'casual' };
   }
-
-  // Chắc chắn cần search
   if (DETECTION_PATTERNS.explicit.test(lower)) {
-    return { needsSearch: true, confidence: 1.0, type: 'knowledge' };
+    return { needsSearch: true, confidence: 1.0, type: 'search' };
   }
   if (DETECTION_PATTERNS.realtime.test(lower)) {
     return { needsSearch: true, confidence: 1.0, type: 'realtime' };
   }
-
-  // Câu hỏi factual rõ ràng — tra Wikipedia
-  if (DETECTION_PATTERNS.factual.test(lower)) {
-    // Trừ các topic AI đã biết chắc
-    const aiKnows = /(python|javascript|typescript|react|node\.js|css|html|sql|thuật toán|data structure|công thức|định lý|phương trình)/i;
-    if (!aiKnows.test(lower)) {
-      return { needsSearch: true, confidence: 0.95, type: 'knowledge' };
-    }
-    return { needsSearch: false, confidence: 0.9 };
-  }
-
-  // Thông tin hiện tại
+  
   if (DETECTION_PATTERNS.current.test(lower)) {
     return { needsSearch: true, confidence: 0.9, type: 'knowledge' };
   }
-
-  // Concept/giải thích — AI thường biết
   if (DETECTION_PATTERNS.concept.test(lower)) {
-    return { needsSearch: false, confidence: 0.85 };
+    const commonTopics = /(python|javascript|lập trình|code|toán|vật lý|hóa|sinh|văn|nghệ thuật)/i;
+    if (commonTopics.test(lower)) {
+      return { needsSearch: false, confidence: 0.9 };
+    }
   }
-
-  // Lời khuyên — AI trả lời được
+  
   if (DETECTION_PATTERNS.advice.test(lower)) {
     return { needsSearch: false, confidence: 0.85 };
   }
-
-  // Câu hỏi ngắn về tên riêng/địa danh — thường cần tra
-  const hasProperNoun = /[A-ZÁÀẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬĐÉÈẺẼẸÊẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌÔỐỒỔỖỘƠỚỜỞỠỢÚÙỦŨỤƯỨỪỬỮỰÝỲỶỸỴ][a-záàảãạăắằẳẵặâấầẩẫậđéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵ]/.test(message);
-  if (hasProperNoun && lower.length < 80) {
-    return { needsSearch: true, confidence: 0.75, type: 'knowledge' };
-  }
-
   return { needsSearch: false, confidence: 0.5 };
 }
 async function shouldSearch(message, groq) {
@@ -466,64 +342,40 @@ async function smartSearch(query, searchType) {
   const cacheKey = normalizeForCache(query);
   const cached = searchCache.get(cacheKey);
   if (cached) {
-    console.log(`✅ Search cache hit (${cached.source})`);
+    console.log(`✅ Search cache hit`);
     return cached;
   }
-  console.log(`🔍 Search type: ${searchType} | query: "${query.substring(0, 50)}"`);
+  console.log(`🔍 Search type: ${searchType}`);
   let result = null;
-
-  // ── Routing thông minh theo loại query ──
-  // realtime (giá, thời tiết, tin tức) → skip Wikipedia, dùng Serper/Tavily ngay
-  const isRealtime = searchType === 'realtime' || 
-    DETECTION_PATTERNS.realtime.test(query.toLowerCase());
-
-  if (!isRealtime) {
-    // Kiến thức/factual → Wikipedia trước (miễn phí, nội dung sâu)
-    console.log(`🔍 Trying Wikipedia (full article)...`);
-    result = await searchWikipedia(query);
-    if (result) {
-      console.log(`✅ Wikipedia: ${result.chars} chars from "${result.title}"`);
-      searchCache.set(cacheKey, result);
-      return result;
-    }
-    console.log(`❌ Wikipedia: no result`);
-  } else {
-    console.log(`⚡ Realtime query — skipping Wikipedia`);
+  console.log(`🔍 Trying Wikipedia...`);
+  result = await searchWikipedia(query);
+  if (result) {
+    console.log(`✅ Wikipedia success`);
+    searchCache.set(cacheKey, result);
+    return result;
   }
+  console.log(`❌ Wikipedia failed`);
 
-  // Serper (Google) — tốt cho realtime và tổng hợp nhiều nguồn
   if (SERPER_API_KEY) {
     console.log(`🔍 Trying Serper...`);
     result = await searchSerper(query);
     if (result) {
-      console.log(`✅ Serper: ${result.results?.length} results`);
+      console.log(`✅ Serper success`);
       searchCache.set(cacheKey, result);
       return result;
     }
     console.log(`❌ Serper failed`);
   }
 
-  // Tavily — fallback cuối, có answer synthesis
   if (TAVILY_API_KEY) {
     console.log(`🔍 Trying Tavily...`);
     result = await searchTavily(query);
     if (result) {
-      console.log(`✅ Tavily: ${result.content?.length || 0} chars`);
+      console.log(`✅ Tavily success`);
       searchCache.set(cacheKey, result);
       return result;
     }
     console.log(`❌ Tavily failed`);
-  }
-
-  // Last resort: nếu là realtime mà thất bại, thử Wikipedia
-  if (isRealtime) {
-    console.log(`🔍 Realtime fallback to Wikipedia...`);
-    result = await searchWikipedia(query);
-    if (result) {
-      console.log(`✅ Wikipedia fallback: ${result.chars} chars`);
-      searchCache.set(cacheKey, result);
-      return result;
-    }
   }
 
   console.log(`❌ All search sources failed`);
@@ -1045,16 +897,8 @@ ${Object.entries(userProfile).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
 ` : ''}
 ${summaryContext}
 ${searchResult ? `
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📚 NGUỒN KIẾN THỨC TÌM ĐƯỢC:
-Nguồn: ${searchResult.source}
-${searchResult.title ? `Chủ đề: ${searchResult.title}` : ''}
-${searchResult.url ? `Link: ${searchResult.url}` : ''}
-
-Nội dung:
-${searchResult.content || searchResult.results?.map(r => `• ${r.title}\n  ${r.content}`).join('\n\n') || ''}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ Hãy dùng thông tin trên để trả lời. Nếu thông tin không đủ hoặc không liên quan, hãy nói rõ và dùng kiến thức sẵn có.
+🔍 KẾT QUẢ TÌM KIẾM (dùng thông tin này để trả lời):
+${JSON.stringify(searchResult, null, 2)}
 ` : ''}
 💾 Context: ${context.contextInfo.messagesInContext} tin mới + ${context.contextInfo.summariesInContext} summaries
 📊 Tổng: ${context.contextInfo.totalMessages} tin, ${context.contextInfo.totalSummaries} summaries
