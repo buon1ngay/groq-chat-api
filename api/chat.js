@@ -82,7 +82,7 @@ const DETECTION_PATTERNS = {
   explicit: /(tìm kiếm|search|tra cứu|google|tìm đi|tìm lại|tìm giúp|tra giúp|wikipedia|wiki)/i,
   realtime: /(giá bitcoin|giá vàng|giá dầu|giá usd|tỷ giá|thời tiết|nhiệt độ|dự báo|tin tức mới nhất|tin tức hôm nay|kết quả bóng đá|lịch thi đấu|xổ số)/i,
   // Câu hỏi factual cần tra cứu — mở rộng nhiều hơn
-  factual: /(là gì|là ai|sinh năm|mất năm|thành lập|ra đời|được tạo ra|tác giả|đạo diễn|diễn viên|thủ đô|dân số|diện tích|lịch sử|nguồn gốc|xuất xứ|ý nghĩa của|định nghĩa|cho.*biết về|nói về|kể về|giới thiệu về|thông tin về|tiểu sử|sự nghiệp)/i,
+  factual: /(là gì|là ai|của ai|do ai|ai phát minh|ai tạo ra|ai viết|ai sáng tác|ai sáng lập|ai đề xuất|sinh năm|mất năm|thành lập|ra đời|được tạo ra|tác giả|đạo diễn|diễn viên|thủ đô|dân số|diện tích|lịch sử|nguồn gốc|xuất xứ|ý nghĩa của|định nghĩa|cho.*biết về|nói về|kể về|giới thiệu về|thông tin về|tiểu sử|sự nghiệp|phát minh|khám phá|lý thuyết|học thuyết|thuyết)/i,
   current: /(hiện nay|hiện tại|bây giờ|hôm nay|năm nay|mới nhất|gần đây|vừa rồi|đang xảy ra|ai đang|ai là)/i,
   concept: /^.*(nghĩa là gì|giải thích|ý nghĩa|khái niệm|nguyên lý|hoạt động như thế nào|cơ chế)/i,
   advice: /^(nên|có nên|tôi nên|làm sao|làm thế nào|bạn nghĩ|theo bạn|ý kiến)/i
@@ -123,7 +123,14 @@ async function getData(key) {
 }
 async function setHashData(key, data, ttl = null) {
   if (redis) {
-    await redis.hset(key, data);
+    // Upstash chỉ chấp nhận string values — serialize tất cả
+    const flat = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (v === null || v === undefined) continue;
+      flat[k] = typeof v === 'string' ? v : JSON.stringify(v);
+    }
+    if (Object.keys(flat).length === 0) return true;
+    await redis.hset(key, flat);
     if (ttl) await redis.expire(key, ttl);
     return true;
   } else {
@@ -133,7 +140,20 @@ async function setHashData(key, data, ttl = null) {
 }
 async function getHashData(key) {
   if (redis) {
-    return await redis.hgetall(key);
+    const raw = await redis.hgetall(key);
+    if (!raw) return {};
+    // Thử parse lại những value đã serialize
+    const result = {};
+    for (const [k, v] of Object.entries(raw)) {
+      try {
+        result[k] = (typeof v === 'string' && (v.startsWith('{') || v.startsWith('[')))
+          ? JSON.parse(v)
+          : v;
+      } catch {
+        result[k] = v;
+      }
+    }
+    return result;
   } else {
     const item = memoryStore.get(key);
     if (!item) return {};
