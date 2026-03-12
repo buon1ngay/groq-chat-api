@@ -217,7 +217,6 @@ async function searchWithRetry(searchFn, name) {
   }
 }
 
-// 🔥 THAY WIKIPEDIA bằng DUCKDUCKGO (FREE, không cần API key)
 const searchDuckDuckGo = (query) => searchWithRetry(async () => {
   const response = await axios.get('https://api.duckduckgo.com/', {
     params: {
@@ -234,7 +233,6 @@ const searchDuckDuckGo = (query) => searchWithRetry(async () => {
 
   const data = response.data;
   
-  // DuckDuckGo trả về Abstract hoặc RelatedTopics
   if (data.Abstract) {
     return {
       source: 'DuckDuckGo',
@@ -244,7 +242,6 @@ const searchDuckDuckGo = (query) => searchWithRetry(async () => {
     };
   }
   
-  // Nếu không có Abstract, lấy từ RelatedTopics
   if (data.RelatedTopics && data.RelatedTopics.length > 0) {
     const firstTopic = data.RelatedTopics[0];
     if (firstTopic.Text) {
@@ -418,7 +415,6 @@ async function smartSearch(query, searchType) {
   console.log(`🔍 Search type: ${searchType}`);
   let result = null;
 
-  // 🔥 Thử DuckDuckGo trước (FREE, không giới hạn)
   console.log(`🔍 Trying DuckDuckGo...`);
   result = await searchDuckDuckGo(query);
   if (result) {
@@ -428,7 +424,6 @@ async function smartSearch(query, searchType) {
   }
   console.log(`❌ DuckDuckGo failed`);
 
-  // Thử Serper nếu có API key
   if (SERPER_API_KEY) {
     console.log(`🔍 Trying Serper...`);
     result = await searchSerper(query);
@@ -440,7 +435,6 @@ async function smartSearch(query, searchType) {
     console.log(`❌ Serper failed`);
   }
 
-  // Thử Tavily nếu có API key
   if (TAVILY_API_KEY) {
     console.log(`🔍 Trying Tavily...`);
     result = await searchTavily(query);
@@ -716,16 +710,10 @@ async function setUserKeyIndex(userId, index) {
   await setData(key, index, 86400);
 }
 
-// 🔥 CẬP NHẬT: Hỗ trợ Vision với Llama 4 Scout
-async function callGroqWithRetry(userId, messages, hasImage = false) {
+async function callGroqWithRetry(userId, messages) {
   let currentKeyIndex = await getUserKeyIndex(userId);
   let attempts = 0;
   const maxAttempts = API_KEYS.length;
-
-  // ✅ Chọn model dựa trên có ảnh hay không
-  const modelToUse = hasImage 
-    ? 'meta-llama/llama-4-scout-17b-16e-instruct' 
-    : 'llama-3.3-70b-versatile';
 
   while (attempts < maxAttempts) {
     try {
@@ -734,7 +722,7 @@ async function callGroqWithRetry(userId, messages, hasImage = false) {
 
       const chatCompletion = await groq.chat.completions.create({
         messages,
-        model: modelToUse,
+        model: 'llama-3.3-70b-versatile',
         temperature: 0.7,
         max_tokens: 2048,
         top_p: 0.9,
@@ -811,8 +799,7 @@ export default async function handler(req, res) {
   const startTime = Date.now();
 
   try {
-    // 🔥 THÊM HỖ TRỢ IMAGE
-    const { message, userId, conversationId, image = null, imageUrl = null } = req.body;
+    const { message, userId, conversationId } = req.body;
 
     if (!message || typeof message !== 'string' || message.trim() === '') {
       return res.status(400).json({ 
@@ -830,45 +817,6 @@ export default async function handler(req, res) {
 
     const finalConversationId = conversationId || 'default';
 
-    // 🔥 XỬ LÝ ẢNH: Download từ URL nếu có
-    let imageBase64 = image;
-    if (imageUrl && !image) {
-      try {
-        console.log(`🖼️ Downloading image from: ${imageUrl}`);
-        const imageResponse = await axios.get(imageUrl, {
-          responseType: 'arraybuffer',
-          timeout: 10000,
-          maxContentLength: 10 * 1024 * 1024 // Max 10MB
-        });
-        
-        const buffer = Buffer.from(imageResponse.data);
-        imageBase64 = `data:image/jpeg;base64,${buffer.toString('base64')}`;
-        console.log(`✅ Image downloaded successfully`);
-      } catch (e) {
-        console.error('❌ Failed to download image:', e.message);
-        return res.status(400).json({ 
-          success: false,
-          error: 'Không thể tải ảnh từ URL: ' + e.message 
-        });
-      }
-    }
-
-    // Validate image size
-    if (imageBase64) {
-      const base64Length = imageBase64.length;
-      const sizeInMB = (base64Length * 0.75) / (1024 * 1024); // Base64 to bytes
-      
-      if (sizeInMB > 4) {
-        return res.status(400).json({
-          success: false,
-          error: `Ảnh quá lớn (${sizeInMB.toFixed(2)}MB). Tối đa 4MB.`
-        });
-      }
-      
-      console.log(`🖼️ Image size: ${sizeInMB.toFixed(2)}MB`);
-    }
-
-    // Special commands
     if (message === '/history') {
       const conversationHistory = await getShortTermMemory(userId, finalConversationId);  
       
@@ -958,15 +906,14 @@ export default async function handler(req, res) {
       });
     }
 
-    console.log(`📱 Request from ${userId}: "${message.substring(0, 50)}..." ${imageBase64 ? '🖼️' : ''}`);
+    console.log(`📱 Request from ${userId}: "${message.substring(0, 50)}..."`);
 
     if (IS_DEV) stats.perf.totalRequests++;
 
     const responseCacheKey = `resp:${userId}:${normalizeForCache(message)}`;
     const cachedResponse = responseCache.get(responseCacheKey);
     
-    // ⚠️ KHÔNG dùng cache nếu có ảnh
-    if (cachedResponse && !imageBase64) {
+    if (cachedResponse) {
       if (IS_DEV) stats.perf.responseCacheHits++;
       console.log(`💾 Response cache hit`); 
       
@@ -997,72 +944,50 @@ export default async function handler(req, res) {
     console.log(`💾 Loaded ${conversationHistory.length} messages`);
 
     let searchResult = null;
-    
-    // ⚠️ SKIP search nếu có ảnh (Vision model tự phân tích)
-    if (!imageBase64) {
-      const searchCacheKey = normalizeForCache(message);
-      const cachedDecision = detectionCache.get(searchCacheKey); 
-      let searchDecision = null; 
+    const searchCacheKey = normalizeForCache(message);
+    const cachedDecision = detectionCache.get(searchCacheKey); 
+    let searchDecision = null; 
 
-      if (cachedDecision) {
-        searchDecision = cachedDecision;
-        console.log(`💾 Using cached search decision`);
-      } else {
-        searchDecision = quickDetect(message);
-        console.log(`⚡ Quick detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'}`);   
-        
-        if (searchDecision.confidence >= 0.8) {
-          detectionCache.set(searchCacheKey, searchDecision);
-        }
-      }
-
-      if (searchDecision.needsSearch) {
-        searchResult = await smartSearch(message, searchDecision.type);
-        if (searchResult) {
-          console.log(`✅ Search successful: ${searchResult.source}`);
-        }
-      }
-
-      if (!cachedDecision && searchDecision.confidence < 0.8) {
-        callTempGroqWithRetry(userId, async (groq) => {
-          const aiDecision = await shouldSearch(message, groq);
-          detectionCache.set(searchCacheKey, aiDecision);     
-          
-          if (aiDecision.needsSearch && !searchResult) {
-            await smartSearch(message, aiDecision.type);
-          }     
-          
-          return aiDecision;
-        }).catch(err => console.error('Background detection error:', err));
+    if (cachedDecision) {
+      searchDecision = cachedDecision;
+      console.log(`💾 Using cached search decision`);
+    } else {
+      searchDecision = quickDetect(message);
+      console.log(`⚡ Quick detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'}`);   
+      
+      if (searchDecision.confidence >= 0.8) {
+        detectionCache.set(searchCacheKey, searchDecision);
       }
     }
 
-    // 🔥 XÂY DỰNG USER MESSAGE (text + image nếu có)
-    const userMessage = {
+    if (searchDecision.needsSearch) {
+      searchResult = await smartSearch(message, searchDecision.type);
+      if (searchResult) {
+        console.log(`✅ Search successful: ${searchResult.source}`);
+      }
+    }
+
+    if (!cachedDecision && searchDecision.confidence < 0.8) {
+      callTempGroqWithRetry(userId, async (groq) => {
+        const aiDecision = await shouldSearch(message, groq);
+        detectionCache.set(searchCacheKey, aiDecision);     
+        
+        if (aiDecision.needsSearch && !searchResult) {
+          await smartSearch(message, aiDecision.type);
+        }     
+        
+        return aiDecision;
+      }).catch(err => console.error('Background detection error:', err));
+    }
+    conversationHistory.push({
       role: 'user',
-      content: imageBase64 ? [
-        {
-          type: 'text',
-          text: message.trim()
-        },
-        {
-          type: 'image_url',
-          image_url: {
-            url: imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`
-          }
-        }
-      ] : message.trim()
-    };
-
-    conversationHistory.push(userMessage);
-
+      content: message.trim()
+    });
     const apiKey = API_KEYS[await getUserKeyIndex(userId)];
-    const tempGroq = new Groq({ apiKey }); 
-    
+    const tempGroq = new Groq({ apiKey });
     const summaries = await manageMemory(userId, finalConversationId, conversationHistory, tempGroq);
     const context = buildContext(conversationHistory, summaries);
     const workingMemory = context.recentMessages;
-
     let summaryContext = '';
     if (context.recentSummaries.length > 0) {
       summaryContext = '\n📚 TÓM TẮT CÁC CUỘC TRÒ CHUYỆN TRƯỚC:\n';
@@ -1080,8 +1005,7 @@ export default async function handler(req, res) {
 
     const systemPrompt = {
       role: 'system',
-      content: `Bạn là Kami, một AI thông minh được tạo ra bởi Nguyễn Đức Thạnh. 
-
+      content: `Bạn là Kami – trợ lý AI có tư duy phân tích sắc bén, hiểu biết rộng về khoa học, công nghệ, toán học, tâm lý học và đời sống thực tế.
 📅 Ngày hiện tại: ${currentDate}
 
 ${Object.keys(userProfile).length > 0 ? `
@@ -1096,22 +1020,38 @@ ${searchResult ? `
 ${JSON.stringify(searchResult, null, 2)}
 ` : ''}
 
-${imageBase64 ? `
-🖼️ PHÂN TÍCH ẢNH: Hãy mô tả chi tiết những gì bạn thấy trong ảnh và trả lời câu hỏi của user.
-` : ''}
-
 💾 Context: ${context.contextInfo.messagesInContext} tin mới + ${context.contextInfo.summariesInContext} summaries
 📊 Tổng: ${context.contextInfo.totalMessages} tin, ${context.contextInfo.totalSummaries} summaries
 
-Hãy trả lời chính xác và tự nhiên bằng tiếng Việt. Có thể thêm tối đa 3 emoji phù hợp.`
+## Nguyên tắc cốt lõi
+- Ưu tiên sự thật, bằng chứng và logic. Không bịa đặt.
+- Phân biệt rõ: sự kiện đã được kiểm chứng / giả thuyết / ý kiến cá nhân.
+- Nếu không biết hoặc không chắc, nói thẳng – không đoán mò.
+- Nếu câu hỏi nằm ngoài khả năng chuyên môn hợp lý, thừa nhận giới hạn đó.
+
+## Cách trả lời
+- Giải thích bản chất vấn đề trước, chi tiết sau.
+- Trình bày mạch lạc, có cấu trúc – nhưng không cứng nhắc theo khuôn mẫu.
+- Dùng ví dụ thực tế khi giúp người dùng hiểu rõ hơn, không dùng ví dụ cho có.
+- Độ dài tương xứng với độ phức tạp của câu hỏi – không trả lời cụt, cũng không lan man vô ích.
+- Nếu câu hỏi mơ hồ, hỏi lại để hiểu đúng ý trước khi trả lời.
+
+## Phong cách
+- Trò chuyện tự nhiên như một người thực sự hiểu vấn đề.
+- Bình tĩnh, khách quan, có chính kiến – bảo vệ quan điểm nếu có cơ sở, sẵn sàng thay đổi nếu có lý lẽ tốt hơn.
+- Không tâng bốc, không xã giao rỗng tuếch.
+- Không né tránh câu hỏi khó hoặc câu trả lời không dễ nghe.
+- Trả lời bằng ngôn ngữ người dùng đang dùng.
+
+## Mục tiêu
+Không phải làm người dùng hài lòng – mà giúp họ hiểu đúng vấn đề, nhìn nhận sự việc rõ ràng hơn và tư duy tốt hơn sau cuộc trò chuyện.`
     };
 
     const messages = [systemPrompt, ...workingMemory];
 
-    console.log(`🤖 Calling AI with ${workingMemory.length} messages... ${imageBase64 ? '(Vision Mode)' : ''}`);
+    console.log(`�vvvv Calling AI with ${workingMemory.length} messages...`);
 
-    // 🔥 GỌI GROQ với Vision support
-    const { groq, chatCompletion } = await callGroqWithRetry(userId, messages, !!imageBase64);
+    const { groq, chatCompletion } = await callGroqWithRetry(userId, messages);
 
     const assistantMessage = chatCompletion.choices[0]?.message?.content || 'Không có phản hồi';
 
@@ -1124,10 +1064,7 @@ Hãy trả lời chính xác và tự nhiên bằng tiếng Việt. Có thể th
 
     await saveShortTermMemory(userId, finalConversationId, conversationHistory);
 
-    // ⚠️ KHÔNG cache response có ảnh
-    if (!imageBase64) {
-      responseCache.set(responseCacheKey, assistantMessage);
-    }
+    responseCache.set(responseCacheKey, assistantMessage);
 
     if (await shouldExtractNow(userId, finalConversationId, conversationHistory)) {
       console.log(`🔍 Background extracting...`); 
@@ -1207,8 +1144,7 @@ Hãy trả lời chính xác và tự nhiên bằng tiếng Việt. Có thể th
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
-        hasImage: !!imageBase64,
-        modelUsed: imageBase64 ? 'meta-llama/llama-4-scout-17b-16e-instruct' : 'llama-3.3-70b-versatile',
+        modelUsed: 'llama-3.3-70b-versatile',
         cached: false
       }
     });
