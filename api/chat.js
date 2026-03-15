@@ -790,13 +790,88 @@ async function callTempGroqWithRetry(userId, fn) {
   
   throw new Error('Đã thử hết tất cả API keys cho tempGroq');
 }
+// ============ VISION HANDLER ============
+async function handleVisionRequest(req, res) {
+  const { imageBase64, mimeType, prompt, userId, conversationId } = req.body;
 
+  if (!imageBase64) {
+    return res.status(400).json({ success: false, error: 'Thiếu dữ liệu ảnh' });
+  }
+
+  if (!userId || !userId.startsWith('user_')) {
+    return res.status(400).json({ success: false, error: 'Invalid userId' });
+  }
+
+  const apiKey = API_KEYS[await getUserKeyIndex(userId)];
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'No API key available' });
+  }
+
+  try {
+    const groq = new Groq({ apiKey });
+
+    const userPrompt = prompt && prompt.trim() !== ''
+      ? prompt.trim()
+      : 'Hãy mô tả chi tiết ảnh này bằng tiếng Việt.';
+
+    const chatCompletion = await groq.chat.completions.create({
+      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${mimeType || 'image/jpeg'};base64,${imageBase64}`
+              }
+            },
+            {
+              type: 'text',
+              text: userPrompt
+            }
+          ]
+        }
+      ],
+      max_tokens: 1024,
+      temperature: 0.7
+    });
+
+    const result = chatCompletion.choices[0]?.message?.content || 'Không thể phân tích ảnh';
+
+    // Lưu vào lịch sử chat như tin nhắn thường
+    const finalConversationId = conversationId || 'default';
+    const conversationHistory = await getShortTermMemory(userId, finalConversationId);
+    conversationHistory.push(
+      { role: 'user', content: `[Ảnh] ${userPrompt}` },
+      { role: 'assistant', content: result }
+    );
+    await saveShortTermMemory(userId, finalConversationId, conversationHistory);
+
+    return res.status(200).json({
+      success: true,
+      message: result,
+      userId,
+      conversationId: finalConversationId
+    });
+
+  } catch (error) {
+    console.error('Vision error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Lỗi phân tích ảnh'
+    });
+  }
+}
+// ============ END VISION HANDLER ============
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
-
-  const startTime = Date.now();
+// 👇 THÊM DÒNG NÀY
+  if (req.body.imageBase64) {
+    return handleVisionRequest(req, res);
+  }  const startTime = Date.now();
 
   try {
     const { message, userId, conversationId } = req.body;
