@@ -570,17 +570,17 @@ async function createNewSummary(groq, messages, summaryNumber) {
 // FIX [12]: Đã xóa hàm summarizeOldMessages không được dùng.
 
 async function manageMemory(userId, conversationId, conversationHistory, groq) {
-  const totalMessages = conversationHistory.length;
-
-  if (totalMessages > MEMORY_CONFIG.MAX_MESSAGES) {
-    const messagesToRemove = totalMessages - MEMORY_CONFIG.MAX_MESSAGES;
+  if (conversationHistory.length > MEMORY_CONFIG.MAX_MESSAGES) {
+    const messagesToRemove = conversationHistory.length - MEMORY_CONFIG.MAX_MESSAGES;
     conversationHistory.splice(0, messagesToRemove);
     console.log(`🗑 Removed ${messagesToRemove} old messages, keeping ${MEMORY_CONFIG.MAX_MESSAGES}`);
   }
 
+  // FIX: Đọc length SAU khi splice để tránh tính unprocessedMessages sai
+  const currentTotal = conversationHistory.length;
   const summaries = await getSummaries(userId, conversationId);
   const messagesProcessed = summaries.length * MEMORY_CONFIG.SUMMARY_THRESHOLD;
-  const unprocessedMessages = totalMessages - messagesProcessed;
+  const unprocessedMessages = currentTotal - messagesProcessed;
 
   if (unprocessedMessages >= MEMORY_CONFIG.SUMMARY_THRESHOLD) {
     const startIdx = messagesProcessed;
@@ -849,10 +849,15 @@ async function handleVisionRequest(req, res) {
       : 'Hãy mô tả chi tiết ảnh này bằng tiếng Việt.';
 
     // FIX [2]: Dùng callTempGroqWithRetry thay vì tạo Groq trực tiếp → có key rotation khi rate limit
+    // FIX [15]: Thêm system prompt cấm markdown để tránh output bị chèn **, ###, bullet points
     const chatCompletion = await callTempGroqWithRetry(userId, async (groq) => {
       return groq.chat.completions.create({
         model: 'meta-llama/llama-4-scout-17b-16e-instruct',
         messages: [
+          {
+            role: 'system',
+            content: 'Trả lời bằng văn xuôi tự nhiên, ngắn gọn, súc tích. Tuyệt đối không dùng markdown: không dùng **, *, ##, ###, không dùng danh sách bullet hay số thứ tự trừ khi người dùng yêu cầu. Trả lời bằng ngôn ngữ người dùng đang dùng.'
+          },
           {
             role: 'user',
             content: [
