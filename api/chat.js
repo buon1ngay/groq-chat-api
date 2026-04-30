@@ -423,7 +423,6 @@ async function shouldSearch(message, groq) {
 async function smartSearch(query, searchType) {
   const cacheKey = normalizeForCache(query);
   const cached = searchCache.get(cacheKey);
-
   if (cached) {
     console.log(`✅ Search cache hit`);
     return cached;
@@ -432,19 +431,10 @@ async function smartSearch(query, searchType) {
   console.log(`🔍 Search type: ${searchType}`);
   let result = null;
 
-  console.log(`🔍 Trying DuckDuckGo...`);
-  result = await searchDuckDuckGo(query);
-  if (result) {
-    console.log(`✅ DuckDuckGo success`);
-    const normalized = normalizeSearchResult(result);
-    searchCache.set(cacheKey, normalized);
-    return normalized;
-  }
-  console.log(`❌ DuckDuckGo failed`);
-
+  // ✅ Serper (Google) — primary
   if (SERPER_API_KEY) {
-    console.log(`🔍 Trying Serper...`);
-    result = await searchSerper(query);
+    console.log(`🔍 Trying Serper (Google)...`);
+    result = await searchWithRetry(() => searchSerper(query), 'Serper');
     if (result) {
       console.log(`✅ Serper success`);
       const normalized = normalizeSearchResult(result);
@@ -454,9 +444,10 @@ async function smartSearch(query, searchType) {
     console.log(`❌ Serper failed`);
   }
 
+  // Tavily — secondary
   if (TAVILY_API_KEY) {
     console.log(`🔍 Trying Tavily...`);
-    result = await searchTavily(query);
+    result = await searchWithRetry(() => searchTavily(query), 'Tavily');
     if (result) {
       console.log(`✅ Tavily success`);
       const normalized = normalizeSearchResult(result);
@@ -464,6 +455,16 @@ async function smartSearch(query, searchType) {
       return normalized;
     }
     console.log(`❌ Tavily failed`);
+  }
+
+  // ✅ DuckDuckGo — fallback cuối cùng (miễn phí nhưng kém nhất)
+  console.log(`🔍 Trying DuckDuckGo (fallback)...`);
+  result = await searchWithRetry(() => searchDuckDuckGo(query), 'DuckDuckGo');
+  if (result) {
+    console.log(`✅ DuckDuckGo success`);
+    const normalized = normalizeSearchResult(result);
+    searchCache.set(cacheKey, normalized);
+    return normalized;
   }
 
   console.log(`❌ All search sources failed`);
@@ -1079,17 +1080,32 @@ export default async function handler(req, res) {
     conversationHistory = validateHistory(conversationHistory);
 
     console.log(`💾 Loaded ${conversationHistory.length} messages`);
+let searchResult = null;
+const searchCacheKey = normalizeForCache(message);
 
-    let searchResult = null;
-    const searchCacheKey = normalizeForCache(message);
-    const cachedDecision = detectionCache.get(searchCacheKey);
-    let searchDecision = null;
+// ✅ Client đã search Google qua hidden WebView → dùng luôn, skip server search
+const clientSearchContext = req.body.searchContext;
+if (clientSearchContext && clientSearchContext.trim().length > 0) {
+  console.log('✅ Using client Google search context');
+  searchResult = {
+    source: 'Google (Client WebView)',
+    content: clientSearchContext.trim(),
+    results: []
+  };
+}
 
-    if (cachedDecision) {
-      searchDecision = cachedDecision;
-      console.log(`💾 Using cached search decision`);
-    } else {
-      searchDecision = quickDetect(message);
+const cachedDecision = detectionCache.get(searchCacheKey);
+let searchDecision = null;
+
+if (searchResult) {
+  // Đã có context từ client → bỏ qua toàn bộ server search
+  searchDecision = { needsSearch: false, confidence: 1.0 };
+  console.log('⏭️ Skipping server search (client provided context)');
+} else if (cachedDecision) {
+  searchDecision = cachedDecision;
+  console.log(`💾 Using cached search decision`);
+} else {
+  searchDecision = quickDetect(message);
       console.log(`⚡ Quick detection: ${searchDecision.needsSearch ? 'SEARCH' : 'SKIP'}`);
 
       if (searchDecision.confidence >= 0.8) {
