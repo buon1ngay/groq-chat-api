@@ -1165,11 +1165,27 @@ export default async function handler(req, res) {
     console.log(`💾 Loaded ${conversationHistory.length} messages`);
 
     let searchResult = null;
-    const searchCacheKey = normalizeForCache(message);
-    const cachedDecision = detectionCache.get(searchCacheKey);
-    let searchDecision = null;
 
-    if (cachedDecision) {
+// ✅ Client gửi kết quả Google lên → dùng luôn, skip server search
+const clientSearchContext = req.body.searchContext;
+if (clientSearchContext && clientSearchContext.trim().length > 0) {
+  console.log(`📱 Client search context received: ${clientSearchContext.length} chars`);
+  searchResult = {
+    source: 'Google (Android WebView)',
+    content: clientSearchContext.trim(),
+    results: []
+  };
+}
+
+const searchCacheKey = normalizeForCache(message);
+const cachedDecision = searchResult ? null : detectionCache.get(searchCacheKey);
+let searchDecision = null;
+
+if (searchResult) {
+  // Đã có context → skip toàn bộ server search
+  searchDecision = { needsSearch: false, confidence: 1.0 };
+  console.log(`⏭️ Skipping server search (client provided context)`);
+} else if (cachedDecision) {
       searchDecision = cachedDecision;
       console.log(`💾 Using cached search decision`);
     } else {
