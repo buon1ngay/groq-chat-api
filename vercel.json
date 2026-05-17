@@ -4,12 +4,20 @@
     {
       "src": "api/chat.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "api/transcribe.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/api/chat",
       "dest": "/api/chat.js"
+    },
+    {
+      "src": "/api/transcribe",
+      "dest": "/api/transcribe.js"
     }
   ]
 }
