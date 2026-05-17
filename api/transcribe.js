@@ -1,11 +1,11 @@
 import Groq from 'groq-sdk';
-import { IncomingForm } from 'formidable';
-import fs from 'fs';
+import { writeFile, unlink } from 'fs/promises';
+import { createReadStream } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: { sizeLimit: '10mb' } },
 };
 
 const API_KEYS = [
@@ -31,38 +31,34 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const form = new IncomingForm({ keepExtensions: true });
-
-  form.parse(req, async (err, fields, files) => {
-    if (err) {
-      return res.status(400).json({ success: false, error: 'Cannot parse form data' });
+  try {
+    const { audio } = req.body;
+    if (!audio) {
+      return res.status(400).json({ success: false, error: 'No audio data' });
     }
 
-    const audioFile = files.audio?.[0] || files.audio;
-    if (!audioFile) {
-      return res.status(400).json({ success: false, error: 'No audio file' });
-    }
+    // Decode base64 → file tạm
+    const buffer = Buffer.from(audio, 'base64');
+    const tmpPath = join(tmpdir(), `voice_${Date.now()}.m4a`);
+    await writeFile(tmpPath, buffer);
 
-    try {
-      const groq = getGroqClient();
-      const transcription = await groq.audio.transcriptions.create({
-        file: fs.createReadStream(audioFile.filepath),
-        model: 'whisper-large-v3-turbo',
-        language: 'vi',
-        response_format: 'json',
-      });
+    const groq = getGroqClient();
+    const transcription = await groq.audio.transcriptions.create({
+      file: createReadStream(tmpPath),
+      model: 'whisper-large-v3-turbo',
+      language: 'vi',
+      response_format: 'json',
+    });
 
-      // Xóa file tạm
-      fs.unlink(audioFile.filepath, () => {});
+    await unlink(tmpPath).catch(() => {});
 
-      return res.status(200).json({
-        success: true,
-        text: transcription.text,
-      });
+    return res.status(200).json({
+      success: true,
+      text: transcription.text,
+    });
 
-    } catch (error) {
-      console.error('Transcribe error:', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
+  } catch (error) {
+    console.error('Transcribe error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
 }
