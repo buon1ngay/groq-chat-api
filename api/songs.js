@@ -1,7 +1,39 @@
-const { getRedis } = require('./_redis.js');
-const redis = getRedis();
+// Dùng Upstash Redis REST API trực tiếp
+const UPSTASH_URL = process.env.UPSTASH_REDIS_URL;  // vd: https://us1-xxx.upstash.io
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_TOKEN;
 
-module.exports = async (req, res) => {
+async function redisCommand(command, ...args) {
+  const response = await fetch(`${UPSTASH_URL}`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${UPSTASH_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify([command, ...args]),
+  });
+  return response.json();
+}
+
+// Helper: get/set JSON
+async function getSongs() {
+  const result = await redisCommand('GET', 'kami_music:songs');
+  if (!result.result) return [];
+  try {
+    return JSON.parse(result.result);
+  } catch { return []; }
+}
+
+async function saveSongs(songs) {
+  await redisCommand('SET', 'kami_music:songs', JSON.stringify(songs));
+}
+
+async function getStats() {
+  const songs = await getSongs();
+  const uniqueUsers = [...new Set(songs.map(s => s.userId).filter(Boolean))].length;
+  return { totalSongs: songs.length, uniqueUsers };
+}
+
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   
@@ -9,59 +41,31 @@ module.exports = async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { offset = '0', limit = '50', search = '', userId = '', sort = 'newest' } = req.query;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+    const sort = req.query.sort || 'newest';
     
-    const off = parseInt(offset) || 0;
-    const lim = Math.min(parseInt(limit) || 50, 200);
-
-    let songs = [];
+    let songs = await getSongs();
     
-    if (userId) {
-      const msgIds = await redis.smembers(`user:${userId}:songs`);
-      for (const mid of msgIds) {
-        const s = await redis.hgetall(`song:${mid}`);
-        if (s && s.id) songs.push(s);
-      }
+    if (sort === 'newest') {
       songs.sort((a, b) => (b.date || 0) - (a.date || 0));
-    } else {
-      const rev = sort === 'oldest' ? false : true;
-      const songsData = await redis.zrange('songs', 0, -1, { rev: rev });
-      
-      songs = songsData.map(s => {
-        try { return JSON.parse(s) } catch(e) { return null }
-      }).filter(Boolean);
+    } else if (sort === 'popular') {
+      songs.sort((a, b) => (b.size || 0) - (a.size || 0));
     }
-
-    if (search) {
-      const q = search.toLowerCase();
-      songs = songs.filter(s => 
-        (s.name || '').toLowerCase().includes(q) ||
-        (s.userId || '').toLowerCase().includes(q)
-      );
-    }
-
-    if (sort === 'name') {
-      songs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    }
-
+    
     const total = songs.length;
-    const paginated = songs.slice(off, off + lim);
-
-    const totalSongs = await redis.get('stats:total_songs') || total;
-
-    return res.status(200).json({
+    const paginated = songs.slice(offset, offset + limit);
+    const hasMore = (offset + limit) < total;
+    const stats = await getStats();
+    
+    res.status(200).json({
       songs: paginated,
       total: total,
-      offset: off,
-      limit: lim,
-      hasMore: (off + lim) < total,
-      stats: {
-        totalSongs: parseInt(totalSongs) || total
-      }
+      hasMore: hasMore,
+      stats: stats
     });
-
-  } catch (e) {
-    console.error('Songs error:', e);
-    return res.status(500).json({ error: e.message });
+  } catch (error) {
+    console.error('Songs error:', error);
+    res.status(500).json({ error: 'Server error', message: error.message });
   }
-};
+}
