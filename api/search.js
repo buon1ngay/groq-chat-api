@@ -1,7 +1,25 @@
-const { getRedis } = require('./_redis.js');
-const redis = getRedis();
+const UPSTASH_URL = process.env.UPSTASH_REDIS_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_TOKEN;
 
-module.exports = async (req, res) => {
+async function redisCommand(command, ...args) {
+  const response = await fetch(`${UPSTASH_URL}`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${UPSTASH_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify([command, ...args]),
+  });
+  return response.json();
+}
+
+async function getSongs() {
+  const result = await redisCommand('GET', 'kami_music:songs');
+  if (!result.result) return [];
+  try { return JSON.parse(result.result); } catch { return []; }
+}
+
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   
@@ -9,32 +27,26 @@ module.exports = async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { q = '', limit = '50' } = req.query;
-    if (!q) return res.status(400).json({ error: 'Missing query' });
-
-    const lim = Math.min(parseInt(limit) || 50, 100);
-    const query = q.toLowerCase().trim();
-
-    const songsData = await redis.zrange('songs', 0, -1, { rev: true });
+    const query = (req.query.q || '').toLowerCase().trim();
+    const limit = parseInt(req.query.limit) || 100;
     
-    const allSongs = songsData.map(s => {
-      try { return JSON.parse(s) } catch(e) { return null }
-    }).filter(Boolean);
-
-    const results = allSongs.filter(s => {
-      const name = (s.name || '').toLowerCase();
-      const uid = (s.userId || '').toLowerCase();
-      return name.includes(query) || uid.includes(query);
-    });
-
-    return res.status(200).json({
-      songs: results.slice(0, lim),
+    if (!query) {
+      return res.status(400).json({ error: 'Query required' });
+    }
+    
+    const songs = await getSongs();
+    const results = songs.filter(s => 
+      (s.name || '').toLowerCase().includes(query) ||
+      (s.userId || '').toLowerCase().includes(query)
+    ).slice(0, limit);
+    
+    res.status(200).json({
+      songs: results,
       total: results.length,
-      query: q
+      query: query
     });
-
-  } catch (e) {
-    console.error('Search error:', e);
-    return res.status(500).json({ error: e.message });
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-};
+}
