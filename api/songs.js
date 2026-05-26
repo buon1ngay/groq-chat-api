@@ -1,71 +1,44 @@
-// Dùng Upstash Redis REST API trực tiếp
-const UPSTASH_URL = process.env.UPSTASH_REDIS_URL;  // vd: https://us1-xxx.upstash.io
+const UPSTASH_URL = process.env.UPSTASH_REDIS_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_TOKEN;
 
-async function redisCommand(command, ...args) {
-  const response = await fetch(`${UPSTASH_URL}`, {
+async function redis(cmd, ...args) {
+  const r = await fetch(UPSTASH_URL, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${UPSTASH_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify([command, ...args]),
+    headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify([cmd, ...args])
   });
-  return response.json();
+  return r.json();
 }
 
-// Helper: get/set JSON
 async function getSongs() {
-  const result = await redisCommand('GET', 'kami_music:songs');
-  if (!result.result) return [];
-  try {
-    return JSON.parse(result.result);
-  } catch { return []; }
-}
-
-async function saveSongs(songs) {
-  await redisCommand('SET', 'kami_music:songs', JSON.stringify(songs));
-}
-
-async function getStats() {
-  const songs = await getSongs();
-  const uniqueUsers = [...new Set(songs.map(s => s.userId).filter(Boolean))].length;
-  return { totalSongs: songs.length, uniqueUsers };
+  const r = await redis('GET', 'kami:songs');
+  try { return JSON.parse(r.result || '[]'); } catch { return []; }
 }
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-
+  if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
+  
   try {
+    let songs = await getSongs();
     const limit = parseInt(req.query.limit) || 50;
     const offset = parseInt(req.query.offset) || 0;
     const sort = req.query.sort || 'newest';
     
-    let songs = await getSongs();
-    
-    if (sort === 'newest') {
-      songs.sort((a, b) => (b.date || 0) - (a.date || 0));
-    } else if (sort === 'popular') {
-      songs.sort((a, b) => (b.size || 0) - (a.size || 0));
-    }
+    if (sort === 'newest') songs.sort((a, b) => (b.date || 0) - (a.date || 0));
+    else if (sort === 'popular') songs.sort((a, b) => (b.size || 0) - (a.size || 0));
     
     const total = songs.length;
-    const paginated = songs.slice(offset, offset + limit);
-    const hasMore = (offset + limit) < total;
-    const stats = await getStats();
+    const uniqueUsers = [...new Set(songs.map(s => s.userId))].filter(Boolean).length;
     
     res.status(200).json({
-      songs: paginated,
+      songs: songs.slice(offset, offset + limit),
       total: total,
-      hasMore: hasMore,
-      stats: stats
+      hasMore: (offset + limit) < total,
+      stats: { totalSongs: total, uniqueUsers: uniqueUsers }
     });
-  } catch (error) {
-    console.error('Songs error:', error);
-    res.status(500).json({ error: 'Server error', message: error.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 }
