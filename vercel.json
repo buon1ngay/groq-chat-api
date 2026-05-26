@@ -1,55 +1,17 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/chat.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/webhook.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/songs.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/search.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/delete.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/stats.js",
-      "use": "@vercel/node"
+  "functions": {
+    "api/*.js": {
+      "maxDuration": 10
     }
-  ],
-  "routes": [
+  },
+  "headers": [
     {
-      "src": "/api/chat",
-      "dest": "/api/chat.js"
-    },
-    {
-      "src": "/api/webhook",
-      "dest": "/api/webhook.js"
-    },
-    {
-      "src": "/api/songs",
-      "dest": "/api/songs.js"
-    },
-    {
-      "src": "/api/search",
-      "dest": "/api/search.js"
-    },
-    {
-      "src": "/api/delete",
-      "dest": "/api/delete.js"
-    },
-    {
-      "src": "/api/stats",
-      "dest": "/api/stats.js"
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" }
+      ]
     }
   ]
 }
