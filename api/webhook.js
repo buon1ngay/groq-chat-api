@@ -1,4 +1,4 @@
-import { getRedis } from './_redis.js'
+const { Redis } = require('@upstash/redis')
 
 const redis = getRedis()
 const BOT_TOKEN = process.env.BOT_TOKEN
