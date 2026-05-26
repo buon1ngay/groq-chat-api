@@ -1,6 +1,5 @@
 const UPSTASH_URL = process.env.UPSTASH_REDIS_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_TOKEN;
-
 async function redis(cmd, ...args) {
   const r = await fetch(UPSTASH_URL, {
     method: 'POST',
