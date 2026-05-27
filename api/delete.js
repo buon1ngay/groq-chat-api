@@ -1,23 +1,11 @@
-const UPSTASH_URL = process.env.UPSTASH_REDIS_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_TOKEN;
+import { Redis } from '@upstash/redis';
 
-async function redis(cmd, ...args) {
-  const r = await fetch(UPSTASH_URL, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify([cmd, ...args])
-  });
-  return r.json();
-}
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_URL,
+  token: process.env.UPSTASH_REDIS_TOKEN,
+});
 
-async function getSongs() {
-  const r = await redis('GET', 'kami:songs');
-  try { return JSON.parse(r.result || '[]'); } catch { return []; }
-}
-
-async function saveSongs(songs) {
-  await redis('SET', 'kami:songs', JSON.stringify(songs));
-}
+const REDIS_KEY = 'kami:songs';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -28,14 +16,27 @@ export default async function handler(req, res) {
     const { message_id, userId } = req.body;
     if (!message_id || !userId) return res.status(400).json({ error: 'Missing fields' });
     
-    const songs = await getSongs();
+    let songs = [];
+    const data = await redis.get(REDIS_KEY);
+    
+    if (data) {
+      try {
+        songs = typeof data === 'string' ? JSON.parse(data) : data;
+      } catch (e) {}
+    }
+    
+    if (!Array.isArray(songs)) songs = [];
+    
     const song = songs.find(s => s.message_id === parseInt(message_id));
     if (!song) return res.status(200).json({ ok: false, error: 'Not found' });
     if (song.userId !== userId) return res.status(200).json({ ok: false, error: 'Not owner' });
     
-    await saveSongs(songs.filter(s => s.message_id !== parseInt(message_id)));
+    const filtered = songs.filter(s => s.message_id !== parseInt(message_id));
+    await redis.set(REDIS_KEY, JSON.stringify(filtered));
+    
     res.status(200).json({ ok: true });
   } catch (e) {
+    console.error('Delete error:', e);
     res.status(500).json({ error: e.message });
   }
 }
