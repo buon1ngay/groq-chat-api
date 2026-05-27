@@ -1060,6 +1060,43 @@ export default async function handler(req, res) {
         conversationId: finalConversationId
       });
     }
+// Thêm vào handler chính hoặc tạo file riêng api/music.js
+
+// GET /api/songs — Lấy tất cả bài hát từ Redis
+if (req.url === '/api/songs' || req.url.startsWith('/api/songs?')) {
+    const songs = await redis.lrange('kami_music:songs', 0, -1);
+    const parsed = songs.map(s => JSON.parse(s)).reverse();
+    // ... dedup, stats, response
+    return res.json({ songs: parsed, total: parsed.length, hasMore: false });
+}
+
+// POST /api/upload — Lưu metadata bài hát
+if (req.url === '/api/upload') {
+    const { file_id, file_name, file_size, message_id, userId, date } = req.body;
+    const songData = JSON.stringify({ id: file_id, file_id, name: file_name, size: file_size, message_id, userId, date });
+    await redis.lpush('kami_music:songs', songData);
+    await redis.ltrim('kami_music:songs', 0, 9999); // Giới hạn 10k bài
+    return res.json({ ok: true });
+}
+
+// POST /api/delete — Xóa bài hát
+if (req.url === '/api/delete') {
+    const { message_id, userId } = req.body;
+    const songs = await redis.lrange('kami_music:songs', 0, -1);
+    // Lọc bỏ bài của user đó
+    // ... 
+    return res.json({ ok: true });
+}
+
+// GET /api/search — Tìm kiếm
+if (req.url.startsWith('/api/search')) {
+    const q = new URL(req.url, 'http://localhost').searchParams.get('q');
+    const songs = await redis.lrange('kami_music:songs', 0, -1);
+    const results = songs.map(s => JSON.parse(s)).filter(s => 
+        s.name.toLowerCase().includes(q.toLowerCase())
+    );
+    return res.json({ songs: results, total: results.length });
+}
 
     if (message === '/memory') {
       const userProfile = await getLongTermMemory(userId);
