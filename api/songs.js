@@ -1,18 +1,11 @@
-const UPSTASH_URL = process.env.UPSTASH_REDIS_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_TOKEN;
-async function redis(cmd, ...args) {
-  const r = await fetch(UPSTASH_URL, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify([cmd, ...args])
-  });
-  return r.json();
-}
+import { Redis } from '@upstash/redis';
 
-async function getSongs() {
-  const r = await redis('GET', 'kami:songs');
-  try { return JSON.parse(r.result || '[]'); } catch { return []; }
-}
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_URL,
+  token: process.env.UPSTASH_REDIS_TOKEN,
+});
+
+const REDIS_KEY = 'kami:songs';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -20,7 +13,19 @@ export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
   
   try {
-    let songs = await getSongs();
+    let songs = [];
+    const data = await redis.get(REDIS_KEY);
+    
+    if (data) {
+      try {
+        songs = typeof data === 'string' ? JSON.parse(data) : data;
+      } catch (e) {
+        console.error('Parse songs error:', e);
+      }
+    }
+    
+    if (!Array.isArray(songs)) songs = [];
+    
     const limit = parseInt(req.query.limit) || 50;
     const offset = parseInt(req.query.offset) || 0;
     const sort = req.query.sort || 'newest';
@@ -35,9 +40,10 @@ export default async function handler(req, res) {
       songs: songs.slice(offset, offset + limit),
       total: total,
       hasMore: (offset + limit) < total,
-      stats: { totalSongs: total, uniqueUsers: uniqueUsers }
+      stats: { totalSongs: total, uniqueUsers }
     });
   } catch (e) {
+    console.error('Songs error:', e);
     res.status(500).json({ error: e.message });
   }
 }
