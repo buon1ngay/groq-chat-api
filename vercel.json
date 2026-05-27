@@ -8,6 +8,7 @@
     { "src": "api/upload.js", "use": "@vercel/node" }
   ],
   "routes": [
+    { "src": "/api/test-redis", "dest": "/api/test-redis.js" }
     { "src": "/api/chat", "dest": "/api/chat.js" },
     { "src": "/api/songs", "dest": "/api/songs.js" },
     { "src": "/api/search", "dest": "/api/search.js" },
