@@ -1,18 +1,23 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/chat.js", "use": "@vercel/node" },
-    { "src": "api/songs.js", "use": "@vercel/node" },
-    { "src": "api/search.js", "use": "@vercel/node" },
-    { "src": "api/delete.js", "use": "@vercel/node" },
-    { "src": "api/upload.js", "use": "@vercel/node" }
+    {
+      "src": "api/chat.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/songs.js",
+      "use": "@vercel/node"
+    }
   ],
   "routes": [
-    { "src": "/api/test-redis", "dest": "/api/test-redis.js" }
-    { "src": "/api/chat", "dest": "/api/chat.js" },
-    { "src": "/api/songs", "dest": "/api/songs.js" },
-    { "src": "/api/search", "dest": "/api/search.js" },
-    { "src": "/api/delete", "dest": "/api/delete.js" },
-    { "src": "/api/upload", "dest": "/api/upload.js" }
+    {
+      "src": "/api/chat",
+      "dest": "/api/chat.js"
+    },
+    {
+      "src": "/api/songs",
+      "dest": "/api/songs.js"
+    }
   ]
 }
