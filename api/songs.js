@@ -49,19 +49,6 @@ function expand(c) {
     date:       c.d,
     userId:     c.u
   };
-
-// Normalize tên để so sánh trùng (bỏ dấu, extension, space)
-function normalizeName(str) {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/đ/g, 'd')
-    .replace(/\.[a-z0-9]{1,5}$/, '')
-    .replace(/[\s_.-]+/g, '');
-}
-
-
 }
 
 // ── Redis helpers ──────────────────────────────────────────────────────
@@ -160,10 +147,9 @@ export default async function handler(req, res) {
 
       const dup = songs.some(s =>
         s.i === String(id) ||
-        (msgId > 0 && s.m === msgId) ||
-        normalizeName(s.n) === normalizeName(name)
+        (msgId > 0 && s.m === msgId)
       );
-      if (dup) return res.status(200).json({ success: true, duplicate: true, message: "Tên bài này đã tồn tại" });
+      if (dup) return res.status(200).json({ success: true, duplicate: true });
 
       if (songs.length >= MAX_SONGS)
         return res.status(429).json({ success: false, error: `Thư viện đầy (${MAX_SONGS})` });
