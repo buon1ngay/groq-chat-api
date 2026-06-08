@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════
-//  KAMI MUSIC API — pages/api/playlists.js
+//  KAMI MUSIC API — pages/api/playlists.js (ĐÃ SỬA)
 //  Lưu playlist vào Redis Upstash
 //  Endpoint phụ: /api/playlists/songs (POST/DELETE thêm/xóa bài)
 // ════════════════════════════════════════════════════════════════════
@@ -57,8 +57,9 @@ export default async function handler(req, res) {
   if (!REDIS_ENABLED || !redis)
     return res.status(503).json({ success: false, error: 'Redis chưa cấu hình' });
 
-  // Phân biệt endpoint /playlists vs /playlists/songs
-  const isSongsEndpoint = (req.url || '').includes('/songs');
+  // Phân biệt endpoint chính xác hơn
+  const rawUrl = req.url || '';
+  const isSongsEndpoint = rawUrl.replace(/\?.*$/, '').includes('/songs');
 
   // ── GET: lấy danh sách tất cả playlist ────────────────────────────
   if (req.method === 'GET') {
@@ -84,20 +85,24 @@ export default async function handler(req, res) {
 
       if (!id || !name || !userId)
         return res.status(400).json({ success: false, error: 'Thiếu id/name/userId' });
+
+      if (!String(name).trim())
+        return res.status(400).json({ success: false, error: 'Tên playlist không được rỗng' });
+
       if (!String(userId).startsWith('user_'))
         return res.status(400).json({ success: false, error: 'userId không hợp lệ' });
 
       const list = await getAll();
 
       if (list.some(p => p.id === String(id)))
-        return res.status(200).json({ success: true, duplicate: true });
+        return res.status(200).json({ success: true, duplicate: true, message: 'Playlist đã tồn tại' });
 
       if (list.length >= MAX_PL)
         return res.status(429).json({ success: false, error: `Đã đạt giới hạn ${MAX_PL} playlist` });
 
       const pl = {
         id: String(id),
-        name: String(name).substring(0, 100),
+        name: String(name).trim().substring(0, 100),
         userId: String(userId),
         ownerName: String(ownerName || userId).substring(0, 50),
         songs: [],
@@ -110,6 +115,7 @@ export default async function handler(req, res) {
       console.log(`✅ Tạo playlist: "${pl.name}" bởi ${userId}`);
       return res.status(200).json({ success: true, playlist: pl, total: list.length });
     } catch (e) {
+      console.error('POST playlist error:', e);
       return res.status(500).json({ success: false, error: e.message });
     }
   }
@@ -134,7 +140,7 @@ export default async function handler(req, res) {
       if (!pl.songs) pl.songs = [];
 
       if (pl.songs.some(s => s.id === song.id))
-        return res.status(200).json({ success: true, duplicate: true });
+        return res.status(200).json({ success: true, duplicate: true, message: 'Bài đã có trong playlist' });
 
       if (pl.songs.length >= MAX_SONGS_PER_PL)
         return res.status(429).json({ success: false, error: `Playlist đã đầy (${MAX_SONGS_PER_PL} bài)` });
@@ -150,6 +156,7 @@ export default async function handler(req, res) {
       await saveAll(list);
       return res.status(200).json({ success: true, total: pl.songs.length });
     } catch (e) {
+      console.error('POST song error:', e);
       return res.status(500).json({ success: false, error: e.message });
     }
   }
@@ -179,6 +186,7 @@ export default async function handler(req, res) {
       await saveAll(list);
       return res.status(200).json({ success: true, total: pl.songs.length });
     } catch (e) {
+      console.error('DELETE song error:', e);
       return res.status(500).json({ success: false, error: e.message });
     }
   }
@@ -211,9 +219,10 @@ export default async function handler(req, res) {
       console.log(`🗑 Xóa playlist: "${deleted.name}" bởi ${isAdmin ? 'ADMIN' : userId}`);
       return res.status(200).json({ success: true });
     } catch (e) {
+      console.error('DELETE playlist error:', e);
       return res.status(500).json({ success: false, error: e.message });
     }
   }
 
-  return res.status(405).json({ error: 'Method not allowed' });
+  return res.status(405).json({ success: false, error: 'Method not allowed' });
 }
