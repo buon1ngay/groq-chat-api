@@ -1,24 +1,29 @@
-// ════════════════════════════════════════════════════════════════════════
-//  KAMI MUSIC — pages/api/playlists.js
-//  Playlist chỉ lưu danh sách file_id (songIds[])
-//  XÓA playlist = xóa danh sách, KHÔNG xóa bài hát gốc trong music:library
-// ════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════
+//  KAMI MUSIC API — pages/api/playlists.js
+//  Lưu playlist vào Redis Upstash
+//  Endpoint phụ: /api/playlists/songs (POST/DELETE thêm/xóa bài)
+// ════════════════════════════════════════════════════════════════════
 
 import { Redis } from '@upstash/redis';
 
 const REDIS_ENABLED = process.env.UPSTASH_REDIS_URL && process.env.UPSTASH_REDIS_TOKEN;
 let redis = null;
+
 if (REDIS_ENABLED) {
   try {
-    redis = new Redis({ url: process.env.UPSTASH_REDIS_URL, token: process.env.UPSTASH_REDIS_TOKEN });
-  } catch (e) { console.error('Redis init error:', e); }
+    redis = new Redis({
+      url: process.env.UPSTASH_REDIS_URL,
+      token: process.env.UPSTASH_REDIS_TOKEN,
+    });
+  } catch (e) {
+    console.error('Redis init error:', e);
+  }
 }
 
-const PL_KEY    = 'music:playlists';
-const MAX_PL    = 200;   // tối đa 200 playlist toàn hệ thống
-const MAX_SONGS = 500;   // tối đa 500 bài / playlist
+const PL_KEY = 'music:playlists';
+const MAX_PL = 500;
+const MAX_SONGS_PER_PL = 200;
 
-// ── Helpers ───────────────────────────────────────────────────────────
 async function getAll() {
   if (!redis) return [];
   try {
@@ -26,20 +31,23 @@ async function getAll() {
     if (!data) return [];
     const arr = typeof data === 'string' ? JSON.parse(data) : data;
     return Array.isArray(arr) ? arr : [];
-  } catch (e) { console.error('getAll error:', e); return []; }
+  } catch (e) {
+    console.error('getAll error:', e);
+    return [];
+  }
 }
 
 async function saveAll(list) {
   if (!redis) return false;
-  try { await redis.set(PL_KEY, JSON.stringify(list)); return true; }
-  catch (e) { console.error('saveAll error:', e); return false; }
+  try {
+    await redis.set(PL_KEY, JSON.stringify(list));
+    return true;
+  } catch (e) {
+    console.error('saveAll error:', e);
+    return false;
+  }
 }
 
-function makeId() {
-  return 'pl_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-}
-
-// ── Handler ───────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -49,153 +57,159 @@ export default async function handler(req, res) {
   if (!REDIS_ENABLED || !redis)
     return res.status(503).json({ success: false, error: 'Redis chưa cấu hình' });
 
-  // ── GET: lấy tất cả playlist (public) ────────────────────────────────
+  // Phân biệt endpoint /playlists vs /playlists/songs
+  const isSongsEndpoint = (req.url || '').includes('/songs');
+
+  // ── GET: lấy danh sách tất cả playlist ────────────────────────────
   if (req.method === 'GET') {
     try {
-      const { id } = req.query;
       const list = await getAll();
-      // Lấy 1 playlist cụ thể
-      if (id) {
-        const pl = list.find(p => p.id === id);
-        if (!pl) return res.status(404).json({ success: false, error: 'Không tìm thấy playlist' });
-        return res.status(200).json({ success: true, playlist: pl });
-      }
-      // Trả tất cả, sắp xếp mới nhất trước
-      const sorted = [...list].sort((a, b) => (b.date || 0) - (a.date || 0));
-      return res.status(200).json({ success: true, playlists: sorted, total: sorted.length });
+      const { limit = '500', offset = '0' } = req.query;
+      const off = parseInt(offset) || 0;
+      const lim = parseInt(limit) || 500;
+      return res.status(200).json({
+        success: true,
+        playlists: list.slice(off, off + lim),
+        total: list.length,
+      });
     } catch (e) {
       return res.status(500).json({ success: false, error: e.message });
     }
   }
 
-  // ── POST ──────────────────────────────────────────────────────────────
-  if (req.method === 'POST') {
-    const { action, userId, playlistId, songId, name } = req.body || {};
+  // ── POST /playlists: tạo playlist mới ─────────────────────────────
+  if (req.method === 'POST' && !isSongsEndpoint) {
+    try {
+      const { id, name, userId, ownerName } = req.body;
 
-    if (!userId || !String(userId).startsWith('user_'))
-      return res.status(400).json({ success: false, error: 'userId không hợp lệ' });
-
-    // --- Tạo playlist mới ---
-    if (action === 'create') {
-      if (!name || !String(name).trim())
-        return res.status(400).json({ success: false, error: 'Thiếu tên playlist' });
+      if (!id || !name || !userId)
+        return res.status(400).json({ success: false, error: 'Thiếu id/name/userId' });
+      if (!String(userId).startsWith('user_'))
+        return res.status(400).json({ success: false, error: 'userId không hợp lệ' });
 
       const list = await getAll();
-      if (list.length >= MAX_PL)
-        return res.status(429).json({ success: false, error: `Hệ thống đã đủ ${MAX_PL} playlist` });
 
-      const trimmed = String(name).trim().substring(0, 60);
-      // Không cho trùng tên trong cùng userId
-      const dup = list.some(p => p.owner === userId && p.name.toLowerCase() === trimmed.toLowerCase());
-      if (dup) return res.status(400).json({ success: false, error: 'Bạn đã có playlist tên này' });
-
-      const pl = {
-        id:      makeId(),
-        name:    trimmed,
-        owner:   userId,
-        songIds: [],                          // chỉ lưu file_id
-        date:    Math.floor(Date.now() / 1000)
-      };
-      list.unshift(pl);
-      await saveAll(list);
-      return res.status(200).json({ success: true, playlist: pl });
-    }
-
-    // --- Thêm bài vào playlist ---
-    if (action === 'add') {
-      if (!playlistId || !songId)
-        return res.status(400).json({ success: false, error: 'Thiếu playlistId hoặc songId' });
-
-      const list = await getAll();
-      const idx  = list.findIndex(p => p.id === playlistId);
-      if (idx < 0) return res.status(404).json({ success: false, error: 'Playlist không tồn tại' });
-
-      // Bất kỳ user nào cũng thêm được bài
-      if (list[idx].songIds.length >= MAX_SONGS)
-        return res.status(429).json({ success: false, error: `Playlist đã đủ ${MAX_SONGS} bài` });
-
-      if (list[idx].songIds.includes(String(songId)))
+      if (list.some(p => p.id === String(id)))
         return res.status(200).json({ success: true, duplicate: true });
 
-      list[idx].songIds.push(String(songId));
+      if (list.length >= MAX_PL)
+        return res.status(429).json({ success: false, error: `Đã đạt giới hạn ${MAX_PL} playlist` });
+
+      const pl = {
+        id: String(id),
+        name: String(name).substring(0, 100),
+        userId: String(userId),
+        ownerName: String(ownerName || userId).substring(0, 50),
+        songs: [],
+        date: Math.floor(Date.now() / 1000),
+      };
+
+      list.unshift(pl);
       await saveAll(list);
-      return res.status(200).json({ success: true, total: list[idx].songIds.length });
+
+      console.log(`✅ Tạo playlist: "${pl.name}" bởi ${userId}`);
+      return res.status(200).json({ success: true, playlist: pl, total: list.length });
+    } catch (e) {
+      return res.status(500).json({ success: false, error: e.message });
     }
-
-    // --- Xóa bài khỏi playlist ---
-    if (action === 'remove') {
-      if (!playlistId || !songId)
-        return res.status(400).json({ success: false, error: 'Thiếu playlistId hoặc songId' });
-
-      const list = await getAll();
-      const idx  = list.findIndex(p => p.id === playlistId);
-      if (idx < 0) return res.status(404).json({ success: false, error: 'Playlist không tồn tại' });
-
-      // Chỉ chủ playlist mới xóa bài khỏi playlist
-      if (list[idx].owner !== userId)
-        return res.status(403).json({ success: false, error: 'Chỉ chủ playlist mới được xóa bài' });
-
-      const before = list[idx].songIds.length;
-      list[idx].songIds = list[idx].songIds.filter(id => id !== String(songId));
-      if (list[idx].songIds.length === before)
-        return res.status(200).json({ success: true, notFound: true });
-
-      await saveAll(list);
-      return res.status(200).json({ success: true, total: list[idx].songIds.length });
-    }
-
-    // --- Đổi tên playlist ---
-    if (action === 'rename') {
-      if (!playlistId || !name)
-        return res.status(400).json({ success: false, error: 'Thiếu playlistId hoặc name' });
-
-      const list = await getAll();
-      const idx  = list.findIndex(p => p.id === playlistId);
-      if (idx < 0) return res.status(404).json({ success: false, error: 'Playlist không tồn tại' });
-      if (list[idx].owner !== userId)
-        return res.status(403).json({ success: false, error: 'Chỉ chủ playlist mới được đổi tên' });
-
-      list[idx].name = String(name).trim().substring(0, 60);
-      await saveAll(list);
-      return res.status(200).json({ success: true, playlist: list[idx] });
-    }
-
-    return res.status(400).json({ success: false, error: 'action không hợp lệ' });
   }
 
-  // ── DELETE: xóa toàn bộ playlist (chỉ chủ) ───────────────────────────
-  // ⚠️ CHỈ XÓA DANH SÁCH — bài hát gốc trong music:library KHÔNG bị ảnh hưởng
-  if (req.method === 'DELETE') {
+  // ── POST /playlists/songs: thêm bài vào playlist ───────────────────
+  if (req.method === 'POST' && isSongsEndpoint) {
     try {
-      const { userId, playlistId, adminKey } = req.body || {};
+      const { id, song, userId } = req.body;
 
-      if (!playlistId)
-        return res.status(400).json({ success: false, error: 'Thiếu playlistId' });
+      if (!id || !song || !userId)
+        return res.status(400).json({ success: false, error: 'Thiếu id/song/userId' });
+
+      const list = await getAll();
+      const pl = list.find(p => p.id === String(id));
+      if (!pl)
+        return res.status(404).json({ success: false, error: 'Không tìm thấy playlist' });
+
+      const isAdmin = req.body.adminKey && req.body.adminKey === process.env.ADMIN_KEY;
+      if (!isAdmin && pl.userId !== String(userId))
+        return res.status(403).json({ success: false, error: 'Không có quyền chỉnh sửa' });
+
+      if (!pl.songs) pl.songs = [];
+
+      if (pl.songs.some(s => s.id === song.id))
+        return res.status(200).json({ success: true, duplicate: true });
+
+      if (pl.songs.length >= MAX_SONGS_PER_PL)
+        return res.status(429).json({ success: false, error: `Playlist đã đầy (${MAX_SONGS_PER_PL} bài)` });
+
+      pl.songs.push({
+        id: song.id,
+        name: String(song.name || '').substring(0, 200),
+        size: parseInt(song.size) || 0,
+        userId: song.userId || '',
+        date: parseInt(song.date) || 0,
+      });
+
+      await saveAll(list);
+      return res.status(200).json({ success: true, total: pl.songs.length });
+    } catch (e) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  }
+
+  // ── DELETE /playlists/songs: xóa bài khỏi playlist ────────────────
+  if (req.method === 'DELETE' && isSongsEndpoint) {
+    try {
+      const { id, idx, userId, adminKey } = req.body;
+
+      if (!id || idx === undefined || !userId)
+        return res.status(400).json({ success: false, error: 'Thiếu id/idx/userId' });
+
+      const list = await getAll();
+      const pl = list.find(p => p.id === String(id));
+      if (!pl)
+        return res.status(404).json({ success: false, error: 'Không tìm thấy playlist' });
+
+      const isAdmin = adminKey && adminKey === process.env.ADMIN_KEY;
+      if (!isAdmin && pl.userId !== String(userId))
+        return res.status(403).json({ success: false, error: 'Không có quyền' });
+
+      const i = parseInt(idx);
+      if (isNaN(i) || i < 0 || i >= (pl.songs || []).length)
+        return res.status(400).json({ success: false, error: 'Index không hợp lệ' });
+
+      pl.songs.splice(i, 1);
+      await saveAll(list);
+      return res.status(200).json({ success: true, total: pl.songs.length });
+    } catch (e) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  }
+
+  // ── DELETE /playlists: xóa cả playlist ────────────────────────────
+  if (req.method === 'DELETE' && !isSongsEndpoint) {
+    try {
+      const { id, userId, adminKey } = req.body;
+
+      if (!id)
+        return res.status(400).json({ success: false, error: 'Thiếu id' });
 
       const isAdmin = adminKey && adminKey === process.env.ADMIN_KEY;
 
-      if (!isAdmin && (!userId || !String(userId).startsWith('user_')))
+      if (!isAdmin && !userId)
         return res.status(400).json({ success: false, error: 'Thiếu userId hoặc adminKey' });
 
       const list = await getAll();
-      const idx  = list.findIndex(p => p.id === playlistId);
+      const idx = list.findIndex(p => p.id === String(id));
 
-      if (idx < 0) return res.status(200).json({ success: true, notFound: true });
+      if (idx < 0)
+        return res.status(200).json({ success: true, notFound: true });
 
-      if (!isAdmin && list[idx].owner !== userId)
-        return res.status(403).json({ success: false, error: 'Chỉ chủ playlist mới được xóa' });
+      if (!isAdmin && list[idx].userId !== String(userId))
+        return res.status(403).json({ success: false, error: 'Không có quyền xóa' });
 
       const deleted = list.splice(idx, 1)[0];
       await saveAll(list);
 
-      // Log rõ ràng để không nhầm với xóa bài hát
-      console.log(`🗑 Xóa PLAYLIST "${deleted.name}" (${deleted.songIds.length} bài) bởi ${isAdmin ? 'ADMIN' : userId} — bài hát gốc KHÔNG bị xóa`);
-
-      return res.status(200).json({
-        success:  true,
-        deleted:  { id: deleted.id, name: deleted.name, songCount: deleted.songIds.length },
-        note:     'Đã xóa playlist. Bài hát gốc trong thư viện không bị ảnh hưởng.'
-      });
+      console.log(`🗑 Xóa playlist: "${deleted.name}" bởi ${isAdmin ? 'ADMIN' : userId}`);
+      return res.status(200).json({ success: true });
     } catch (e) {
       return res.status(500).json({ success: false, error: e.message });
     }
