@@ -181,6 +181,24 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, total: pl.songs.length });
     }
 
+    // --- Đổi tên playlist ---
+    if (action === 'rename') {
+      const { name } = body;
+      if (!playlistId || !name || !String(name).trim())
+        return res.status(400).json({ success: false, error: 'Thiếu playlistId hoặc name' });
+
+      const list = await getAll();
+      const pl = list.find(p => p.id === playlistId);
+      if (!pl) return res.status(404).json({ success: false, error: 'Playlist không tồn tại' });
+
+      if (!isAdmin && pl.userId !== String(userId))
+        return res.status(403).json({ success: false, error: 'Chỉ chủ playlist mới được đổi tên' });
+
+      pl.name = String(name).trim().substring(0, 100);
+      await saveAll(list);
+      return res.status(200).json({ success: true, name: pl.name });
+    }
+
     return res.status(400).json({ success: false, error: `action không hợp lệ: ${action}` });
   }
 
