@@ -97,6 +97,10 @@ export default async function handler(req, res) {
       if (list.length >= MAX_PL)
         return res.status(429).json({ success: false, error: `Hệ thống đạt giới hạn ${MAX_PL} playlist` });
 
+      const userPlCount = list.filter(p => p.userId === String(userId)).length;
+      if (!isAdmin && userPlCount >= 10)
+        return res.status(429).json({ success: false, error: 'Bạn đã tạo tối đa 10 playlist' });
+
       const dup = list.some(p => p.userId === userId && p.name.toLowerCase() === name.toLowerCase());
       if (dup) return res.status(400).json({ success: false, error: 'Bạn đã có playlist tên này' });
 
