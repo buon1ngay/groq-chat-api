@@ -1,8 +1,8 @@
 // ════════════════════════════════════════════════════════════════════════
 //  KAMI MUSIC API — pages/api/songs.js
-//  Compact storage: {i,n,s,m,d,u} thay vì field name dài
-//  Tiết kiệm ~40% Redis so với format cũ
-//  Auto-migrate bài cũ (format dài) → compact khi đọc
+//  Compact storage: {i,n,s,m,d,u,c} thay vì field name dài
+//  c = channel (1 hoặc 2) — default 1 nếu không truyền
+//  Bài cũ không có c → tự coi là c=1 khi đọc
 // ════════════════════════════════════════════════════════════════════════
 
 import { Redis } from '@upstash/redis';
@@ -24,22 +24,24 @@ if (REDIS_ENABLED) {
 const MUSIC_KEY = 'music:library';
 const MAX_SONGS = 10000;
 
-// ── Format compact: {i,n,s,m,d,u} ─────────────────────────────────────
-// i = file_id (Telegram)   n = name   s = size
-// m = message_id           d = date   u = userId
+// ── Format compact: {i,n,s,m,d,u,c} ──────────────────────────────────
+// i = file_id (Telegram)   n = name    s = size
+// m = message_id           d = date    u = userId
+// c = channel (1|2)        ← MỚI, tiết kiệm ~3 byte/bài
 
 function pack(song) {
+  const ch = parseInt(song.channel || song.c) || 1;
   return {
     i: String(song.id   || song.i  || ''),
     n: String(song.name || song.n  || '').substring(0, 200),
     s: parseInt(song.size || song.s) || 0,
     m: parseInt(song.message_id || song.m) || 0,
     d: parseInt(song.date || song.d) || Math.floor(Date.now() / 1000),
-    u: String(song.userId || song.u || '')
+    u: String(song.userId || song.u || ''),
+    c: ch === 2 ? 2 : 1   // chỉ lưu 2 nếu thật sự = 2, còn lại = 1
   };
 }
 
-// Expand để client dễ đọc (trả về trong response GET/POST)
 function expand(c) {
   return {
     id:         c.i,
@@ -47,7 +49,8 @@ function expand(c) {
     size:       c.s,
     message_id: c.m,
     date:       c.d,
-    userId:     c.u
+    userId:     c.u,
+    channel:    c.c || 1   // bài cũ không có c → trả về 1
   };
 }
 
@@ -90,7 +93,7 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     try {
       const { q, limit = '10000', offset = '0', sort = 'newest' } = req.query;
-      const songs = await getLibrary(); // compact []
+      const songs = await getLibrary();
 
       if (q && q.trim()) {
         const query = q.trim().toLowerCase();
@@ -130,11 +133,11 @@ export default async function handler(req, res) {
   // ── POST ─────────────────────────────────────────────────────────────
   if (req.method === 'POST') {
     try {
-      // Chấp nhận cả format cũ (id,name,userId) lẫn mới (i,n,u)
-      const body = req.body;
-      const id     = body.id || body.i;
-      const name   = body.name || body.n;
-      const userId = body.userId || body.u;
+      const body    = req.body;
+      const id      = body.id || body.i;
+      const name    = body.name || body.n;
+      const userId  = body.userId || body.u;
+      const adminKey = body.adminKey;
 
       if (!id || !name || !userId)
         return res.status(400).json({ success: false, error: 'Thiếu: id/i, name/n, userId/u' });
@@ -142,8 +145,12 @@ export default async function handler(req, res) {
       if (!String(userId).startsWith('user_'))
         return res.status(400).json({ success: false, error: 'userId không hợp lệ' });
 
-      const songs = await getLibrary();
-      const msgId = parseInt(body.message_id || body.m) || 0;
+      // Chỉ admin mới được chỉ định channel=2
+      const isAdmin = adminKey && adminKey === process.env.ADMIN_KEY;
+      const channel = isAdmin ? (parseInt(body.channel || body.c) || 1) : 1;
+
+      const songs  = await getLibrary();
+      const msgId  = parseInt(body.message_id || body.m) || 0;
 
       const dup = songs.some(s =>
         s.i === String(id) ||
@@ -154,7 +161,7 @@ export default async function handler(req, res) {
       if (songs.length >= MAX_SONGS)
         return res.status(429).json({ success: false, error: `Thư viện đầy (${MAX_SONGS})` });
 
-      const compact = pack({ ...body, id, name, userId });
+      const compact = pack({ ...body, id, name, userId, channel });
       songs.unshift(compact);
       await saveLibrary(songs);
 
@@ -174,7 +181,6 @@ export default async function handler(req, res) {
       if (!id)
         return res.status(400).json({ success: false, error: 'Thiếu id' });
 
-      // Admin xóa bất kỳ bài nào — chỉ cần đúng ADMIN_KEY trong env Vercel
       const isAdmin = adminKey && adminKey === process.env.ADMIN_KEY;
 
       if (!isAdmin && !userId)
