@@ -3,6 +3,7 @@
 //  Single-file handler, action-based (giống songs.js)
 //  XÓA playlist = xóa danh sách, KHÔNG xóa bài gốc trong music:library
 //  Khi bài hát bị xóa khỏi library → auto-clean khỏi playlist khi GET
+//  Song entry trong playlist giờ mang thêm channel (ch) để stream đúng bot
 // ════════════════════════════════════════════════════════════════════════
 
 import { Redis } from '@upstash/redis';
@@ -15,9 +16,9 @@ if (REDIS_ENABLED) {
   } catch (e) { console.error('Redis init:', e); }
 }
 
-const PL_KEY   = 'music:playlists';
-const LIB_KEY  = 'music:library';
-const MAX_PL   = 500;
+const PL_KEY    = 'music:playlists';
+const LIB_KEY   = 'music:library';
+const MAX_PL    = 500;
 const MAX_SONGS = 200;
 
 async function getAll() {
@@ -36,11 +37,27 @@ async function saveAll(list) {
   catch (e) { return false; }
 }
 
+// Lấy map id → channel từ library để gắn ch vào playlist song
+async function getLibraryChannelMap() {
+  try {
+    const d = await redis.get(LIB_KEY);
+    if (!d) return null;
+    const a = typeof d === 'string' ? JSON.parse(d) : d;
+    if (!Array.isArray(a)) return null;
+    const map = {};
+    for (const s of a) {
+      const id = String(s.i || s.id || '');
+      if (id) map[id] = s.c || 1;
+    }
+    return map;
+  } catch (e) { return null; }
+}
+
 // Lấy tập hợp id bài hát còn tồn tại trong library
 async function getLiveIds() {
   try {
     const d = await redis.get(LIB_KEY);
-    if (!d) return null; // null = không kiểm được, bỏ qua
+    if (!d) return null;
     const a = typeof d === 'string' ? JSON.parse(d) : d;
     if (!Array.isArray(a)) return null;
     return new Set(a.map(s => String(s.i || s.id || '')).filter(Boolean));
@@ -56,11 +73,11 @@ export default async function handler(req, res) {
   if (!REDIS_ENABLED || !redis)
     return res.status(503).json({ success: false, error: 'Redis chưa cấu hình' });
 
-  // ── GET: lấy tất cả playlist, auto-clean bài đã xóa ─────────────────
+  // ── GET: lấy tất cả playlist, auto-clean bài đã xóa, gắn channel ────
   if (req.method === 'GET') {
     try {
       let list = await getAll();
-      const liveIds = await getLiveIds();
+      const [liveIds, chMap] = await Promise.all([getLiveIds(), getLibraryChannelMap()]);
       let dirty = false;
 
       if (liveIds) {
@@ -68,9 +85,17 @@ export default async function handler(req, res) {
           const before = (pl.songs || []).length;
           pl.songs = (pl.songs || []).filter(s => liveIds.has(String(s.id || s.i || '')));
           if (pl.songs.length !== before) dirty = true;
+
+          // Gắn channel vào từng song trong playlist để client stream đúng bot
+          if (chMap) {
+            pl.songs = pl.songs.map(s => {
+              const sid = String(s.id || s.i || '');
+              return { ...s, channel: chMap[sid] || s.channel || 1 };
+            });
+          }
           return pl;
         });
-        if (dirty) saveAll(list); // lưu lại không cần await
+        if (dirty) saveAll(list);
       }
 
       return res.status(200).json({ success: true, playlists: list, total: list.length });
@@ -105,11 +130,11 @@ export default async function handler(req, res) {
       if (dup) return res.status(400).json({ success: false, error: 'Bạn đã có playlist tên này' });
 
       const pl = {
-        id:    'pl_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
-        name:  name.substring(0, 100),
+        id:     'pl_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        name:   name.substring(0, 100),
         userId: String(userId),
-        songs: [],
-        date:  Math.floor(Date.now() / 1000),
+        songs:  [],
+        date:   Math.floor(Date.now() / 1000),
       };
       list.unshift(pl);
       await saveAll(list);
@@ -118,7 +143,7 @@ export default async function handler(req, res) {
 
     // --- Thêm bài vào playlist ---
     if (action === 'add') {
-      const { song } = body; // song = { id, name, size, ... }
+      const { song } = body; // song = { id, name, size, channel, ... }
       if (!playlistId || !song || !song.id)
         return res.status(400).json({ success: false, error: 'Thiếu playlistId hoặc song' });
 
@@ -136,7 +161,12 @@ export default async function handler(req, res) {
       if (pl.songs.length >= MAX_SONGS)
         return res.status(429).json({ success: false, error: `Playlist đã đầy (${MAX_SONGS} bài)` });
 
-      pl.songs.push({ id: String(song.id), name: String(song.name || '').substring(0, 200), size: parseInt(song.size) || 0 });
+      pl.songs.push({
+        id:      String(song.id),
+        name:    String(song.name || '').substring(0, 200),
+        size:    parseInt(song.size) || 0,
+        channel: parseInt(song.channel) || 1   // ← lưu channel
+      });
       await saveAll(list);
       return res.status(200).json({ success: true, total: pl.songs.length });
     }
@@ -160,7 +190,12 @@ export default async function handler(req, res) {
         if (!song || !song.id) continue;
         if (pl.songs.some(s => String(s.id) === String(song.id))) continue;
         if (pl.songs.length >= MAX_SONGS) break;
-        pl.songs.push({ id: String(song.id), name: String(song.name || '').substring(0, 200), size: parseInt(song.size) || 0 });
+        pl.songs.push({
+          id:      String(song.id),
+          name:    String(song.name || '').substring(0, 200),
+          size:    parseInt(song.size) || 0,
+          channel: parseInt(song.channel) || 1   // ← lưu channel
+        });
         added++;
       }
       await saveAll(list);
