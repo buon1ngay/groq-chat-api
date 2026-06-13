@@ -148,9 +148,11 @@ export default async function handler(req, res) {
       const songs = await getLibrary();
       const msgId = parseInt(body.message_id || body.m) || 0;
 
+      const channel = parseInt(body.channel != null ? body.channel : body.c) || 0;
+
       const dup = songs.some(s =>
         s.i === String(id) ||
-        (msgId > 0 && s.m === msgId)
+        (msgId > 0 && s.m === msgId && (s.c || 0) === channel)
       );
       if (dup) return res.status(200).json({ success: true, duplicate: true });
 
