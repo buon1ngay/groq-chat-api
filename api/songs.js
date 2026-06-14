@@ -92,7 +92,7 @@ export default async function handler(req, res) {
   // ── GET ──────────────────────────────────────────────────────────────
   if (req.method === 'GET') {
     try {
-      const { q, limit = '10000', offset = '0', sort = 'newest' } = req.query;
+      const { q, limit = '50000', offset = '0', sort = 'newest' } = req.query;
       const songs = await getLibrary(); // compact []
 
       if (q && q.trim()) {
@@ -113,7 +113,7 @@ export default async function handler(req, res) {
       );
 
       const off  = parseInt(offset) || 0;
-      const lim  = parseInt(limit)  || 10000;
+      const lim  = parseInt(limit)  || 50000;
       const page = sorted.slice(off, off + lim);
 
       const uniqueUsers = new Set(songs.map(s => s.u).filter(Boolean)).size;
