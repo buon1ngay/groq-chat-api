@@ -1,15 +1,6 @@
-// ════════════════════════════════════════════════════════════════════════
-//  KAMI MUSIC API — pages/api/songs.js
-//  Compact storage: {i,n,s,m,d,u} thay vì field name dài
-//  Tiết kiệm ~40% Redis so với format cũ
-//  Auto-migrate bài cũ (format dài) → compact khi đọc
-// ════════════════════════════════════════════════════════════════════════
-
 import { Redis } from '@upstash/redis';
-
 const REDIS_ENABLED = process.env.UPSTASH_REDIS_URL && process.env.UPSTASH_REDIS_TOKEN;
 let redis = null;
-
 if (REDIS_ENABLED) {
   try {
     redis = new Redis({
@@ -20,15 +11,12 @@ if (REDIS_ENABLED) {
     console.error('Redis init error:', e);
   }
 }
-
 const MUSIC_KEY = 'music:library';
 const MAX_SONGS = 50000;
-
 // ── Format compact: {i,n,s,m,d,u,c} ───────────────────────────────────
 // i = file_id (Telegram)   n = name   s = size
 // m = message_id           d = date   u = userId
 // c = channel (0=Kho1, 1=Kho KAMI, 2=Kho3, 3=Kho4, 4=Kho5)
-
 function pack(song) {
   return {
     i: String(song.id   || song.i  || ''),
@@ -40,8 +28,6 @@ function pack(song) {
     c: parseInt(song.channel != null ? song.channel : song.c) || 0
   };
 }
-
-// Expand để client dễ đọc (trả về trong response GET/POST)
 function expand(c) {
   return {
     id:         c.i,
@@ -53,8 +39,6 @@ function expand(c) {
     channel:    c.c || 0
   };
 }
-
-// ── Redis helpers ──────────────────────────────────────────────────────
 async function getLibrary() {
   if (!redis) return [];
   try {
@@ -67,7 +51,6 @@ async function getLibrary() {
     return [];
   }
 }
-
 async function saveLibrary(songs) {
   if (!redis) return false;
   try {
@@ -78,23 +61,46 @@ async function saveLibrary(songs) {
     return false;
   }
 }
-
-// ── Handler ────────────────────────────────────────────────────────────
+const LOCK_KEY = 'music:lock';
+const LOCK_TTL_MS = 10000;
+const LOCK_MAX_WAIT_MS = 8000;
+const LOCK_RETRY_MS = 80;
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function acquireLock() {
+  if (!redis) return null;
+  const token = Math.random().toString(36).slice(2) + Date.now();
+  const start = Date.now();
+  while (Date.now() - start < LOCK_MAX_WAIT_MS) {
+    try {
+      const ok = await redis.set(LOCK_KEY, token, { nx: true, px: LOCK_TTL_MS });
+      if (ok) return token;
+    } catch (e) {
+      console.error('acquireLock error:', e);
+    }
+    await _sleep(LOCK_RETRY_MS);
+  }
+  return null;
+}
+async function releaseLock(token) {
+  if (!redis || !token) return;
+  try {
+    const cur = await redis.get(LOCK_KEY);
+    if (cur === token) await redis.del(LOCK_KEY);
+  } catch (e) {
+    console.error('releaseLock error:', e);
+  }
+}
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
-
   if (!REDIS_ENABLED || !redis)
     return res.status(503).json({ success: false, error: 'Redis chưa cấu hình' });
-
-  // ── GET ──────────────────────────────────────────────────────────────
   if (req.method === 'GET') {
     try {
       const { q, limit = '50000', offset = '0', sort = 'newest' } = req.query;
       const songs = await getLibrary(); // compact []
-
       if (q && q.trim()) {
         const query = q.trim().toLowerCase();
         const results = songs.filter(s =>
@@ -107,17 +113,13 @@ export default async function handler(req, res) {
           total:   results.length
         });
       }
-
       const sorted = [...songs].sort((a, b) =>
         sort === 'oldest' ? (a.d || 0) - (b.d || 0) : (b.d || 0) - (a.d || 0)
       );
-
       const off  = parseInt(offset) || 0;
       const lim  = parseInt(limit)  || 50000;
       const page = sorted.slice(off, off + lim);
-
       const uniqueUsers = new Set(songs.map(s => s.u).filter(Boolean)).size;
-
       return res.status(200).json({
         success: true,
         songs:   page.map(expand),
@@ -129,65 +131,58 @@ export default async function handler(req, res) {
       return res.status(500).json({ success: false, error: e.message });
     }
   }
-
-  // ── POST ─────────────────────────────────────────────────────────────
   if (req.method === 'POST') {
+    let lockToken = null;
     try {
+      lockToken = await acquireLock();
+      if (!lockToken)
+        return res.status(503).json({ success: false, error: 'Server bận, thử lại sau' });
       // Chấp nhận cả format cũ (id,name,userId) lẫn mới (i,n,u)
       const body = req.body;
       const id     = body.id || body.i;
       const name   = body.name || body.n;
       const userId = body.userId || body.u;
-
       if (!id || !name || !userId)
         return res.status(400).json({ success: false, error: 'Thiếu: id/i, name/n, userId/u' });
-
       if (!String(userId).startsWith('user_'))
         return res.status(400).json({ success: false, error: 'userId không hợp lệ' });
-
       const songs = await getLibrary();
       const msgId = parseInt(body.message_id || body.m) || 0;
-
       const channel = parseInt(body.channel != null ? body.channel : body.c) || 0;
-
       const norm = (s) => String(s || '')
         .toLowerCase()
         .replace(/\.[a-z0-9]{1,5}$/, '')
         .replace(/[\s_.-]+/g, '');
-
       const nName = norm(name);
-
       const dup = songs.some(s =>
         s.i === String(id) ||
         (msgId > 0 && s.m === msgId && (s.c || 0) === channel) ||
         norm(s.n) === nName
       );
       if (dup) return res.status(200).json({ success: true, duplicate: true });
-
       if (songs.length >= MAX_SONGS)
         return res.status(429).json({ success: false, error: `Thư viện đầy (${MAX_SONGS})` });
-
       const compact = pack({ ...body, id, name, userId });
       songs.unshift(compact);
       await saveLibrary(songs);
-
       return res.status(200).json({ success: true, song: expand(compact), total: songs.length });
     } catch (e) {
       return res.status(500).json({ success: false, error: e.message });
+    } finally {
+      await releaseLock(lockToken);
     }
   }
-
-  // ── DELETE ────────────────────────────────────────────────────────────
   if (req.method === 'DELETE') {
+    let lockToken = null;
     try {
+      lockToken = await acquireLock();
+      if (!lockToken)
+        return res.status(503).json({ success: false, error: 'Server bận, thử lại sau' });
       const id       = req.body.id || req.body.i;
       const userId   = req.body.userId || req.body.u;
       const adminKey = req.body.adminKey;
-
       if (!id)
         return res.status(400).json({ success: false, error: 'Thiếu id' });
-
-      // Admin xóa bất kỳ bài nào — chỉ cần đúng ADMIN_KEY trong env Vercel
       const isAdmin = adminKey && adminKey === process.env.ADMIN_KEY;
       if (!isAdmin && !userId)
         return res.status(400).json({ success: false, error: 'Thiếu userId hoặc adminKey' });
@@ -202,6 +197,8 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, ok: true, isAdmin });
     } catch (e) {
       return res.status(500).json({ success: false, error: e.message });
+    } finally {
+      await releaseLock(lockToken);
     }
   }
   return res.status(405).json({ error: 'Method not allowed' });
