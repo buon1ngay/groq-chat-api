@@ -12,6 +12,10 @@
     {
       "src": "api/playlists.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "api/favorites.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
@@ -26,6 +30,10 @@
     {
       "src": "/api/playlists",
       "dest": "/api/playlists.js"
+    },
+    {
+      "src": "/api/favorites",
+      "dest": "/api/favorites.js"
     }
   ]
 }
