@@ -164,7 +164,9 @@ export default async function handler(req, res) {
         return res.status(429).json({ success: false, error: `Thư viện đầy (${MAX_SONGS})` });
       const compact = pack({ ...body, id, name, userId });
       songs.unshift(compact);
-      await saveLibrary(songs);
+      const saved = await saveLibrary(songs);
+      if (!saved)
+        return res.status(500).json({ success: false, error: 'Lưu thư viện thất bại, vui lòng thử lại' });
       return res.status(200).json({ success: true, song: expand(compact), total: songs.length });
     } catch (e) {
       return res.status(500).json({ success: false, error: e.message });
@@ -192,7 +194,9 @@ export default async function handler(req, res) {
       if (!isAdmin && songs[idx].u !== String(userId))
         return res.status(403).json({ success: false, error: 'Không có quyền xóa' });
       const deleted = songs.splice(idx, 1)[0];
-      await saveLibrary(songs);
+      const saved = await saveLibrary(songs);
+      if (!saved)
+        return res.status(500).json({ success: false, error: 'Xóa thất bại, vui lòng thử lại' });
       console.log(`🗑 Xóa: "${deleted.n}" bởi ${isAdmin ? 'ADMIN' : userId}`);
       return res.status(200).json({ success: true, ok: true, isAdmin });
     } catch (e) {
