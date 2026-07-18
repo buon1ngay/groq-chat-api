@@ -77,6 +77,7 @@ function toPublicFile(it) {
     size: it.size,
     message_id: it.message_id,
     date: it.date,
+    channel: Number.isInteger(it.channel) ? it.channel : (parseInt(it.channel) || 0),
     canEdit: true, // riêng tư -> chủ file luôn được sửa/xoá/tải
   };
 }
@@ -135,6 +136,7 @@ export default async function handler(req, res) {
         size: Number(f.size) || 0,
         message_id: Number(f.message_id) || 0,
         date: Number(f.date) || Math.floor(Date.now() / 1000),
+        channel: Math.min(4, Math.max(0, parseInt(f.channel) || 0)),
         ownerId: userId,
       }));
       const ok = await saveFiles(userId, clean);
@@ -148,9 +150,15 @@ export default async function handler(req, res) {
       if (!id && !file_id) {
         return res.status(400).json({ success: false, error: 'Thiếu id/file_id' });
       }
+      const channel = Math.min(4, Math.max(0, parseInt(body.channel) || 0));
       const list = await getFiles(userId);
       const fid = file_id || id;
-      if (list.some((f) => f.file_id === fid)) {
+      const msgId = Number(message_id) || 0;
+      const dup = list.some((f) =>
+        f.file_id === fid ||
+        (msgId > 0 && Number(f.message_id) === msgId && (Number(f.channel) || 0) === channel)
+      );
+      if (dup) {
         return res.status(200).json({ success: true, duplicate: true });
       }
       if (list.length >= MAX_FILES) {
@@ -166,8 +174,9 @@ export default async function handler(req, res) {
         file_id: fid,
         name: name ? String(name).slice(0, 300) : 'Unknown',
         size: fsize,
-        message_id: Number(message_id) || 0,
+        message_id: msgId,
         date: Math.floor(Date.now() / 1000),
+        channel,
         ownerId: userId,
       };
       list.unshift(item);
