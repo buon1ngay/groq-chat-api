@@ -211,6 +211,38 @@ function safeParseJSON(text, fallback = {}) {
   }
 }
 
+function stripThinking(content) {
+  if (!content || typeof content !== 'string') return content;
+
+  // 1. Lọc <think>...** tags (Qwen/QwQ reasoning format)
+  content = content.replace(/<think[\s\S]*?<\/think>/gi, '');
+
+  // 2. Nếu có "Final Polish" → chỉ giữ phần SAU nó (đó là câu trả lời cuối)
+  const finalPolishMatch = content.match(/(?:\*\*)?Final Polish[^:\n]*:[\s\n]*/i);
+  if (finalPolishMatch) {
+    const idx = content.indexOf(finalPolishMatch[0]) + finalPolishMatch[0].length;
+    content = content.substring(idx);
+  } else {
+    // 3. Nếu có "Refining" mà không có "Final Polish" → cắt từ "Refining" trở đi
+    const refiningMatch = content.match(/(?:\*\*)?Refining[^:\n]*:?[\s\n]*/i);
+    if (refiningMatch) {
+      const idx = content.indexOf(refiningMatch[0]);
+      content = content.substring(0, idx);
+    }
+  }
+
+  // 4. Xóa markdown ** còn sót
+  content = content.replace(/\*\*/g, '');
+
+  // 5. Xóa bullet points đầu dòng còn sót
+  content = content.replace(/^[-•]\s+/gm, '');
+
+  // 6. Xóa dòng trống thừa
+  content = content.replace(/\n{3,}/g, '\n\n').trim();
+
+  return content;
+}
+
 async function retryWithBackoff(fn, maxRetries = 2) {
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -835,7 +867,7 @@ async function callGroqWithRetry(userId, messages) {
 
       const chatCompletion = await groq.chat.completions.create({
         messages,
-        model: 'qwen/qwen3-32b',
+        model: 'openai/gpt-oss-120b',
         temperature: 0.7,
         max_tokens: 2048,
         top_p: 0.9,
@@ -940,7 +972,7 @@ async function handleVisionRequest(req, res) {
         messages: [
           {
             role: 'system',
-            content: 'Trả lời bằng văn xuôi tự nhiên, ngắn gọn, súc tích. Tuyệt đối không dùng markdown: không dùng **, *, ##, ###, không dùng danh sách bullet hay số thứ tự trừ khi người dùng yêu cầu. Trả lời bằng ngôn ngữ người dùng đang dùng.'
+            content: 'Trả lời bằng văn xuôi tự nhiên, ngắn gọn, súc tích. Tuyệt đối không dùng markdown: không dùng **, *, ##, ###, không dùng danh sách bullet hay số thứ tự trừ khi người dùng yêu cầu. Trả lời bằng tiếng Việt. KHÔNG giải thích quá trình suy nghĩ, KHÔNG dùng từ "Based on", "Looking at", "I think". Trả lời trực tiếp kết quả.'
           },
           {
             role: 'user',
@@ -963,7 +995,15 @@ async function handleVisionRequest(req, res) {
       });
     });
 
-    const result = chatCompletion.choices[0]?.message?.content || 'Không thể phân tích ảnh';
+    let result = chatCompletion.choices[0]?.message?.content || 'Không thể phân tích ảnh';
+
+    // Lọc phần thinking/reasoning của model
+    result = stripThinking(result);
+
+    // Fallback nếu lọc xong bị rỗng
+    if (!result || result.trim() === '') {
+      result = 'Không thể phân tích ảnh';
+    }
 
     // Validate history trước khi push
     const finalConversationId = conversationId || 'default';
@@ -1385,7 +1425,7 @@ ${searchSection}
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
-        modelUsed: 'qwen/qwen3-32b',
+        modelUsed: 'openai/gpt-oss-120b',
         cached: false
       }
     });
