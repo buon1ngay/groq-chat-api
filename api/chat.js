@@ -835,7 +835,7 @@ async function callGroqWithRetry(userId, messages) {
 
       const chatCompletion = await groq.chat.completions.create({
         messages,
-        model: 'openai/gpt-oss-120b',
+        model: 'qwen/qwen3-32b',
         temperature: 0.7,
         max_tokens: 2048,
         top_p: 0.9,
@@ -1385,7 +1385,7 @@ ${searchSection}
         storageType: REDIS_ENABLED ? 'Redis' : 'In-Memory',
         searchUsed: !!searchResult,
         searchSource: searchResult?.source || null,
-        modelUsed: 'openai/gpt-oss-120b',
+        modelUsed: 'qwen/qwen3-32b',
         cached: false
       }
     });
