@@ -2,6 +2,7 @@
 // Cần thêm 2 biến môi trường trong Vercel Project Settings > Environment Variables:
 //   SUPABASE_URL              = https://xxxx.supabase.co
 //   SUPABASE_SERVICE_ROLE_KEY = (lấy trong Supabase > Project Settings > API > service_role)
+//   ADMIN_KEY                 = (tự đặt, dùng cho admin panel duyệt bài)
 // LƯU Ý: service_role key có toàn quyền, TUYỆT ĐỐI không đưa vào code client Android.
 
 const MAX_TITLE = 200;
@@ -11,6 +12,7 @@ const MAX_AUTHOR = 50;
 export default async function handler(req, res) {
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const ADMIN_KEY = process.env.ADMIN_KEY;
 
   if (!SUPABASE_URL || !SUPABASE_KEY) {
     console.error('Thiếu SUPABASE_URL hoặc SUPABASE_SERVICE_ROLE_KEY trong env');
@@ -24,7 +26,7 @@ export default async function handler(req, res) {
   };
 
   try {
-    // ─────────── GET: lấy danh mục hoặc bài viết đã duyệt ───────────
+    // ─────────── GET: lấy danh mục, bài viết đã duyệt, hoặc tất cả bài (admin) ───────────
     if (req.method === 'GET') {
       const { action, category_id } = req.query;
 
@@ -38,6 +40,22 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true, categories: data });
       }
 
+      // Admin: lấy tất cả bài viết (mọi status)
+      if (action === 'admin') {
+        const r = await fetch(
+          `${SUPABASE_URL}/rest/v1/forum_posts?select=*,forum_categories(name)&order=created_at.desc`,
+          { headers }
+        );
+        if (!r.ok) throw new Error('Supabase admin posts fetch failed: ' + (await r.text()));
+        const data = await r.json();
+        // Flatten category name
+        const posts = data.map(p => ({
+          ...p,
+          category_name: p.forum_categories?.name || ''
+        }));
+        return res.status(200).json({ success: true, posts });
+      }
+
       // Mặc định: lấy bài đã duyệt, lọc theo category_id nếu có
       let url = `${SUPABASE_URL}/rest/v1/forum_posts?select=id,category_id,title,content,author,created_at&status=eq.approved&order=created_at.desc&limit=30`;
       if (category_id) url += `&category_id=eq.${encodeURIComponent(category_id)}`;
@@ -48,9 +66,40 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, posts: data });
     }
 
-    // ─────────── POST: gửi bài mới, mặc định pending chờ duyệt ───────────
+    // ─────────── POST: gửi bài mới hoặc duyệt/từ chối bài (admin) ───────────
     if (req.method === 'POST') {
-      const { category_id, title, content, author } = req.body || {};
+      const body = req.body || {};
+
+      // ── Moderate: admin duyệt/từ chối bài ──
+      if (body.action === 'moderate') {
+        const { id, status, adminKey } = body;
+
+        if (!ADMIN_KEY) {
+          return res.status(500).json({ success: false, errorCode: '500', error: 'Admin key chưa được cấu hình' });
+        }
+        if (adminKey !== ADMIN_KEY) {
+          return res.status(403).json({ success: false, errorCode: '403', error: 'Admin key không đúng' });
+        }
+        if (!id || !status || !['approved', 'rejected', 'pending'].includes(status)) {
+          return res.status(400).json({ success: false, errorCode: '400', error: 'Thiếu id hoặc status không hợp lệ' });
+        }
+
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/forum_posts?id=eq.${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { ...headers, Prefer: 'return=minimal' },
+          body: JSON.stringify({ status })
+        });
+
+        if (!r.ok) {
+          console.error('Supabase moderate error:', await r.text());
+          return res.status(500).json({ success: false, errorCode: '500', error: 'Không cập nhật được trạng thái bài viết' });
+        }
+
+        return res.status(200).json({ success: true, message: status === 'approved' ? 'Đã duyệt bài viết' : 'Đã từ chối bài viết' });
+      }
+
+      // ── Gửi bài mới, mặc định pending chờ duyệt ──
+      const { category_id, title, content, author } = body;
 
       if (!category_id || !title || !String(title).trim() || !content || !String(content).trim()) {
         return res.status(400).json({ success: false, errorCode: '400', error: 'Thiếu danh mục, tiêu đề hoặc nội dung' });
@@ -62,7 +111,7 @@ export default async function handler(req, res) {
         return res.status(413).json({ success: false, errorCode: '413', error: `Nội dung tối đa ${MAX_CONTENT} ký tự` });
       }
 
-      const body = {
+      const insertBody = {
         category_id,
         title: String(title).trim(),
         content: String(content).trim(),
@@ -73,7 +122,7 @@ export default async function handler(req, res) {
       const r = await fetch(`${SUPABASE_URL}/rest/v1/forum_posts`, {
         method: 'POST',
         headers: { ...headers, Prefer: 'return=minimal' },
-        body: JSON.stringify(body)
+        body: JSON.stringify(insertBody)
       });
 
       if (!r.ok) {
