@@ -10,6 +10,17 @@ const MAX_CONTENT = 5000;
 const MAX_AUTHOR = 50;
 
 export default async function handler(req, res) {
+  // ── CORS headers for all responses ──
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PATCH, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey');
+
+  // ── Handle OPTIONS preflight ──
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const ADMIN_KEY = process.env.ADMIN_KEY;
