@@ -1027,7 +1027,7 @@ async function handleVisionRequest(req, res) {
             ]
           }
         ],
-        max_tokens: 1200,
+        max_tokens: 950,
         temperature: 0.7,
         reasoning_effort: 'none' // Qwen3.6 hỗ trợ tắt hẳn suy nghĩ -> khớp với yêu cầu "không giải thích quá trình suy nghĩ" ở trên, đỡ tốn token
       });
