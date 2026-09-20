@@ -1,9 +1,79 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/**/*.js", "use": "@vercel/node" }
+    {
+      "src": "api/chat.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/songs.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/favorites.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/geocode.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/kamicloud.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/playlists.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/book-learn-v2.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/book-export-v2.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/book-import-v2.js",
+      "use": "@vercel/node"
+    }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "/api/$1.js" }
+    {
+      "src": "/api/chat",
+      "dest": "/api/chat.js"
+    },
+    {
+      "src": "/api/songs",
+      "dest": "/api/songs.js"
+    },
+    {
+      "src": "/api/favorites",
+      "dest": "/api/favorites.js"
+    },
+    {
+      "src": "/api/geocode",
+      "dest": "/api/geocode.js"
+    },
+    {
+      "src": "/api/kamicloud",
+      "dest": "/api/kamicloud.js"
+    },
+    {
+      "src": "/api/playlists",
+      "dest": "/api/playlists.js"
+    },
+    {
+      "src": "/api/book-learn-v2",
+      "dest": "/api/book-learn-v2.js"
+    },
+    {
+      "src": "/api/book-export-v2",
+      "dest": "/api/book-export-v2.js"
+    },
+    {
+      "src": "/api/book-import-v2",
+      "dest": "/api/book-import-v2.js"
+    }
   ]
 }
