@@ -15,14 +15,20 @@ const EVENT_PREFIX = 'book:learn-event:v2:';
 const EVENT_TTL = 31536000;
 const MAX_BATCH = 500;
 const MAX_KEY = 231; // 77 plies * 3 chars
+const RL_ITEMS_PER_MIN = 1500; // per IP, counted in ITEMS (not requests)
+const SCAN_COUNT = 500;
+const PIPE_CHUNK = 200;
 const MOVE_RE = /^[A-Za-z0-9_-]{3}$/;
 const KEY_RE = /^(?:[A-Za-z0-9_-]{3})*$/;
+const ID_RE = /^[A-Za-z0-9_-]{8,120}$/;
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader('Cache-Control', 'no-store');
 }
 
 function json(res, code, body) {
@@ -50,44 +56,64 @@ function decodeMoveRange(mv) {
   return src >= 0 && src < 90 && dst >= 0 && dst < 90 && src !== dst;
 }
 
-async function rateLimit(req) {
+// The limit counts items, so one request with 500 items costs 500 (before: 1).
+async function rateLimit(req, cost) {
   const k = RL_PREFIX + clientIp(req) + ':' + Math.floor(Date.now() / 60000);
-  const n = await redis.incr(k);
-  if (n === 1) await redis.expire(k, 70);
-  return n <= 120;
+  const p = redis.pipeline();
+  p.incrby(k, cost);
+  p.expire(k, 70);
+  const r = await p.exec();
+  return Number(r[0]) <= RL_ITEMS_PER_MIN;
+}
+
+// Reads moves from a hash. A move counts if EITHER its ':s' or ':n' field exists,
+// so a move whose score is 0 but count > 0 is no longer invisible.
+function movesOf(h) {
+  const moves = {};
+  if (!h) return moves;
+  const seen = new Set();
+  for (const f of Object.keys(h)) {
+    if (!f.endsWith(':s') && !f.endsWith(':n')) continue;
+    const mv = f.slice(0, -2);
+    if (seen.has(mv) || !MOVE_RE.test(mv)) continue;
+    seen.add(mv);
+    const score = Number(h[mv + ':s']) || 0;
+    const count = Number(h[mv + ':n']) || 0;
+    if (score !== 0 || count > 0) moves[mv] = [score, count];
+  }
+  return moves;
 }
 
 async function getAllLearned() {
-  const out = {};
+  const keys = [];
   let cursor = '0';
   do {
-    const r = await redis.scan(cursor, { match: PREFIX + '*', count: 100 });
+    const r = await redis.scan(cursor, { match: PREFIX + '*', count: SCAN_COUNT });
     cursor = String(r[0]);
-    const keys = r[1] || [];
-    for (const key of keys) {
+    for (const key of (r[1] || [])) {
       if (key === VERSION_KEY || key.startsWith(RL_PREFIX)) continue;
-      const pos = key.slice(PREFIX.length);
-      if (!KEY_RE.test(pos)) continue;
-      const h = await redis.hgetall(key);
-      const moves = {};
-      if (h) {
-        for (const field of Object.keys(h)) {
-          if (!field.endsWith(':s')) continue;
-          const mv = field.slice(0, -2);
-          if (!MOVE_RE.test(mv)) continue;
-          const score = Number(h[field]) || 0;
-          const count = Number(h[mv + ':n']) || 0;
-          if (score !== 0 || count > 0) moves[mv] = [score, count];
-        }
-      }
-      if (Object.keys(moves).length) out[pos] = moves;
+      if (KEY_RE.test(key.slice(PREFIX.length))) keys.push(key);
     }
   } while (cursor !== '0');
+
+  const uniq = [...new Set(keys)];
+  const out = {};
+  // one HTTP round trip per 200 keys instead of one per key
+  for (let i = 0; i < uniq.length; i += PIPE_CHUNK) {
+    const chunk = uniq.slice(i, i + PIPE_CHUNK);
+    const p = redis.pipeline();
+    for (const k of chunk) p.hgetall(k);
+    const rows = await p.exec();
+    chunk.forEach((k, j) => {
+      const moves = movesOf(rows[j]);
+      if (Object.keys(moves).length) out[k.slice(PREFIX.length)] = moves;
+    });
+  }
   return out;
 }
 
 module.exports = async (req, res) => {
-  if (req.method === 'OPTIONS') return json(res, 204, {});
+  if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
   try {
     if (req.method === 'GET') {
       const current = Number(await redis.get(VERSION_KEY) || 0);
@@ -105,12 +131,12 @@ module.exports = async (req, res) => {
     if (body.schema !== SCHEMA) {
       return json(res, 200, { ok: true, accepted: 0, version: Number(await redis.get(VERSION_KEY) || 0) });
     }
-    if (!(await rateLimit(req))) return json(res, 429, { ok: false, error: 'Rate limit' });
 
     const items = Array.isArray(body.items) ? body.items : [];
     if (!items.length || items.length > MAX_BATCH) return json(res, 400, { ok: false, error: 'items 1..500' });
+    if (!(await rateLimit(req, items.length))) return json(res, 429, { ok: false, error: 'Rate limit' });
 
-    let accepted = 0;
+    const clean = [];
     for (const it of items) {
       const key = String(it?.key || '');
       const move = String(it?.move || '');
@@ -118,17 +144,41 @@ module.exports = async (req, res) => {
       let delta = Number(it?.delta);
       if (!KEY_RE.test(key) || key.length > MAX_KEY || !MOVE_RE.test(move) || !Number.isInteger(delta)) continue;
       if (!decodeMoveRange(move)) continue;
-      if (id && !/^[A-Za-z0-9_-]{8,120}$/.test(id)) continue;
-      delta = Math.max(-3, Math.min(3, delta));
+      if (!ID_RE.test(id)) continue; // id is mandatory: it is what makes a retry safe (no double counting / replay)
+      delta = Math.max(-1, Math.min(1, delta)); // the app only ever sends +1 / -1
       if (delta === 0) continue;
-      if (id) {
-        const fresh = await redis.set(EVENT_PREFIX + id, '1', { nx: true, ex: EVENT_TTL });
-        if (fresh !== 'OK') continue;
+      clean.push({ key, move, id, delta });
+    }
+
+    let accepted = 0;
+    if (clean.length) {
+      // 1) claim every event id in one round trip (NX also de-duplicates inside the batch)
+      const pe = redis.pipeline();
+      for (const c of clean) pe.set(EVENT_PREFIX + c.id, '1', { nx: true, ex: EVENT_TTL });
+      const er = await pe.exec();
+      const fresh = clean.filter((c, i) => er[i] === 'OK');
+
+      // 2) apply all increments in one round trip
+      if (fresh.length) {
+        try {
+          const pw = redis.pipeline();
+          for (const c of fresh) {
+            const rk = PREFIX + c.key;
+            pw.hincrby(rk, c.move + ':s', c.delta);
+            pw.hincrby(rk, c.move + ':n', 1);
+          }
+          await pw.exec();
+          accepted = fresh.length;
+        } catch (err) {
+          // give the ids back so the client's retry is not swallowed as a duplicate
+          try {
+            const pr = redis.pipeline();
+            for (const c of fresh) pr.del(EVENT_PREFIX + c.id);
+            await pr.exec();
+          } catch (_) {}
+          throw err;
+        }
       }
-      const redisKey = PREFIX + key;
-      await redis.hincrby(redisKey, move + ':s', delta);
-      await redis.hincrby(redisKey, move + ':n', 1);
-      accepted++;
     }
 
     const version = accepted ? Number(await redis.incr(VERSION_KEY)) : Number(await redis.get(VERSION_KEY) || 0);
