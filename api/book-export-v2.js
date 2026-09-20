@@ -1,5 +1,5 @@
-const crypto = require('crypto');
-const { Redis } = require('@upstash/redis');
+import crypto from 'crypto';
+import { Redis } from '@upstash/redis';
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_URL,
   token: process.env.UPSTASH_REDIS_TOKEN
@@ -9,7 +9,7 @@ const SCHEMA_FORMAT = 'kami-xiangqi-learn-v2';
 const PREFIX = 'book:learn:v2:';
 const VERSION_KEY = 'book:learn:v2:version';
 const RL_PREFIX = 'book:learn:v2:rl:';
-const ADMIN_KEY = process.env.BOOK_ADMIN_KEY || '';
+const ADMIN_KEY = process.env.BOOK_ADMIN_KEY || process.env.ADMIN_KEY || '';
 const KEY_RE = /^(?:[A-Za-z0-9_-]{3})*$/;
 const MOVE_RE = /^[A-Za-z0-9_-]{3}$/;
 const SCAN_COUNT = 500;
@@ -54,7 +54,7 @@ function movesOf(h) {
   return moves;
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
   if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'Method not allowed' });
   if (!authorized(req)) return json(res, 401, { ok: false, error: 'Unauthorized - set BOOK_ADMIN_KEY' });
@@ -97,4 +97,4 @@ module.exports = async (req, res) => {
     console.error(e);
     return json(res, 500, { ok: false, error: 'Export failed' });
   }
-};
+}

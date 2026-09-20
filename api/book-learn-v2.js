@@ -1,4 +1,4 @@
-const { Redis } = require('@upstash/redis');
+import { Redis } from '@upstash/redis';
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_URL,
   token: process.env.UPSTASH_REDIS_TOKEN
@@ -112,7 +112,7 @@ async function getAllLearned() {
   return out;
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
   try {
     if (req.method === 'GET') {
@@ -187,4 +187,4 @@ module.exports = async (req, res) => {
     console.error(e);
     return json(res, 500, { ok: false, error: 'Server error' });
   }
-};
+}
