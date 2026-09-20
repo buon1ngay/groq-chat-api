@@ -5,8 +5,5 @@
   ],
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1.js" }
-  ],
-  "crons": [
-    { "path": "/api/supabase-keepalive", "schedule": "0 3 * * *" }
   ]
 }
