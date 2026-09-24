@@ -9,7 +9,6 @@ const SCHEMA_FORMAT = 'kami-xiangqi-learn-v2';
 const PREFIX = 'book:learn:v2:';
 const VERSION_KEY = 'book:learn:v2:version';
 const RL_PREFIX = 'book:learn:v2:rl:';
-const EVENT_PREFIX = 'book:learn-event:v2:';
 const ADMIN_KEY = process.env.BOOK_ADMIN_KEY || process.env.ADMIN_KEY || '';
 const KEY_RE = /^(?:[A-Za-z0-9_-]{3})*$/;
 const MOVE_RE = /^[A-Za-z0-9_-]{3}$/;
@@ -69,18 +68,6 @@ async function allPositionKeys() {
   return [...new Set(out)];
 }
 
-// Idempotency markers only (book:learn-event:v2:<id>), never position data - safe to wipe independently.
-async function allEventKeys() {
-  const out = [];
-  let cursor = '0';
-  do {
-    const r = await redis.scan(cursor, { match: EVENT_PREFIX + '*', count: SCAN_COUNT });
-    cursor = String(r[0]);
-    for (const k of (r[1] || [])) out.push(k);
-  } while (cursor !== '0');
-  return [...new Set(out)];
-}
-
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
   if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'Method not allowed' });
@@ -88,19 +75,6 @@ export default async function handler(req, res) {
 
   try {
     const body = bodyOf(req);
-
-    // Separate maintenance action: purge the learn-event dedup keys only. Does not touch book:learn:v2:* data
-    // and does not require the backup format/positions fields below.
-    if (body.mode === 'purge-events') {
-      const keys = await allEventKeys();
-      for (let i = 0; i < keys.length; i += CHUNK) {
-        const p = redis.pipeline();
-        for (const k of keys.slice(i, i + CHUNK)) p.del(k);
-        await p.exec();
-      }
-      return json(res, 200, { ok: true, mode: 'purge-events', deleted: keys.length });
-    }
-
     if (body.format !== SCHEMA_FORMAT || !body.positions || typeof body.positions !== 'object' || Array.isArray(body.positions)) {
       return json(res, 400, { ok: false, error: 'Invalid backup format - expected ' + SCHEMA_FORMAT });
     }
