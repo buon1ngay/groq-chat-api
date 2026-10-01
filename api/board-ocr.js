@@ -1,129 +1,77 @@
-// Vercel: api/board-ocr.js
-// POST { image: "data:image/jpeg;base64,..." }
-// Returns { ok:true, board:[[...9 chars] x 10] }
-
-const MODEL = process.env.BOARD_OCR_MODEL || 'meta-llama/llama-4-maverick-17b-128e-instruct';
+const GROQ_MODEL = 'meta-llama/llama-4-maverick-17b-128e-instruct';
 
 function getKeys() {
   const keys = [];
-  if (process.env.GROQ_API_KEY) keys.push(process.env.GROQ_API_KEY);
-  for (let i = 1; i <= 10; i++) {
-    const k = process.env['GROQ_API_KEY_' + i];
-    if (k) keys.push(k);
+  for (let i = 0; i <= 10; i++) {
+    const name = i === 0 ? 'GROQ_API_KEY' : `GROQ_API_KEY_${i}`;
+    if (process.env[name]) keys.push(process.env[name]);
   }
-  return [...new Set(keys.filter(Boolean))];
+  return keys;
 }
 
-function cleanImageData(image) {
-  if (typeof image !== 'string') return null;
-  if (!/^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/i.test(image)) return null;
-  // Keep the request bounded. The Android client already compresses to ~1600px JPEG.
-  if (image.length > 12 * 1024 * 1024) return null;
-  return image;
-}
-
-function parseModelJson(text) {
-  let s = String(text || '').trim();
-  s = s.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
-  const a = s.indexOf('{');
-  const b = s.lastIndexOf('}');
-  if (a >= 0 && b > a) s = s.slice(a, b + 1);
-  return JSON.parse(s);
-}
-
-function validBoard(board) {
-  if (!Array.isArray(board) || board.length !== 10) return false;
-  const allowed = new Set(['R','N','B','A','K','C','P','r','n','b','a','k','c','p',' ']);
-  let rk = 0, bk = 0;
-  for (const row of board) {
-    if (!Array.isArray(row) || row.length !== 9) return false;
-    for (const x of row) {
-      if (!allowed.has(x)) return false;
-      if (x === 'K') rk++;
-      if (x === 'k') bk++;
-    }
-  }
-  return rk === 1 && bk === 1;
-}
-
-function normaliseBoard(board) {
-  if (!validBoard(board)) return null;
-  return board.map(row => row.map(x => (x === '.' || x === '0' || x === '-') ? ' ' : x));
-}
-
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST') return res.status(405).json({ ok:false, error:'POST only' });
+  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
 
-  const image = cleanImageData(req.body && req.body.image);
-  if (!image) return res.status(400).json({ ok:false, error:'Ảnh không hợp lệ hoặc quá lớn.' });
-
-  const keys = getKeys();
-  if (!keys.length) return res.status(500).json({ ok:false, error:'Chưa cấu hình GROQ_API_KEY.' });
-
-  const prompt = `Bạn là bộ nhận dạng bàn Cờ Tướng từ ảnh. Chỉ nhận dạng bàn cờ, không phân tích nước đi.
-
-QUY ƯỚC BẮT BUỘC:
-- Bàn có đúng 10 hàng x 9 cột giao điểm.
-- Hàng 0 là hàng trên cùng trong ảnh; hàng 9 là hàng dưới cùng.
-- Cột 0 là trái nhất; cột 8 là phải nhất.
-- Quân Đỏ dùng chữ HOA: R Xe, N Mã, B Tượng, A Sĩ, K Tướng, C Pháo, P Tốt.
-- Quân Đen dùng chữ thường: r Xe, n Mã, b Tượng, a Sĩ, k Tướng, c Pháo, p Tốt.
-- Ô trống là một dấu cách ' '.
-- Không được tự suy ra nước đi hoặc thay đổi vị trí vì cho rằng thế cờ bất thường.
-- Nếu ảnh không đủ rõ để xác định một quân, ưu tiên trả về ' ' cho ô đó thay vì đoán.
-- Tuyệt đối trả JSON thuần, không markdown.
-
-JSON bắt buộc:
-{"board":[[9 ô],[9 ô],[9 ô],[9 ô],[9 ô],[9 ô],[9 ô],[9 ô],[9 ô],[9 ô]],"confidence":0.0}
-
-Ảnh có thể là ảnh chụp màn hình hoặc ảnh chụp bàn cờ thực tế. Hãy xác định vùng bàn cờ trước rồi lập ma trận 10x9.`;
-
-  const body = {
-    model: MODEL,
-    temperature: 0,
-    max_tokens: 1800,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'text', text: prompt },
-        { type: 'image_url', image_url: { url: image } }
-      ]
-    }]
-  };
-
-  let lastError = 'OCR failed';
-  for (const key of keys) {
-    try {
-      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + key,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
-      const text = await r.text();
-      if (!r.ok) {
-        lastError = 'Groq HTTP ' + r.status;
-        continue;
-      }
-      const j = JSON.parse(text);
-      const content = j?.choices?.[0]?.message?.content || '';
-      const parsed = parseModelJson(content);
-      const board = normaliseBoard(parsed.board);
-      if (!board) {
-        lastError = 'AI trả về ma trận bàn cờ không hợp lệ.';
-        continue;
-      }
-      const confidence = Math.max(0, Math.min(1, Number(parsed.confidence) || 0));
-      return res.status(200).json({ ok:true, board, confidence, model:MODEL });
-    } catch (e) {
-      lastError = e?.message || String(e);
+  try {
+    const image = req.body && req.body.image;
+    if (!image || typeof image !== 'string' || !image.startsWith('data:image/')) {
+      return res.status(400).json({ ok: false, error: 'Thiếu image data URL' });
     }
+    if (image.length > 12 * 1024 * 1024) {
+      return res.status(413).json({ ok: false, error: 'Ảnh quá lớn' });
+    }
+
+    const prompt = `Bạn là bộ nhận dạng bàn cờ Tướng. Đọc ẢNH BÀN CỜ và trả về DUY NHẤT JSON hợp lệ, không markdown.
+Ma trận đúng 10 hàng x 9 cột; hàng 0 là phía ĐEN, hàng 9 là phía ĐỎ.
+Ký hiệu: R=Xe đỏ, N=Mã đỏ, B=Tượng đỏ, A=Sĩ đỏ, K=Tướng đỏ, C=Pháo đỏ, P=Tốt đỏ.
+r=xe đen,n=mã đen,b=tượng đen,a=sĩ đen,k=tướng đen,c=pháo đen,p=tốt đen.
+Ô trống là chuỗi rỗng "".
+Dạng JSON: {"board":[[...10 hàng, mỗi hàng đúng 9 ô...]],"pieces":số_quân,"confidence":0..1}.
+Không tự thêm quân nếu không nhìn thấy. Nếu ảnh không phải bàn cờ Tướng hoặc không đọc được, trả {"board":[],"pieces":0,"confidence":0}.`;
+
+    const keys = getKeys();
+    if (!keys.length) throw new Error('Chưa cấu hình GROQ_API_KEY');
+    let lastErr = null;
+
+    for (let attempt = 0; attempt < keys.length; attempt++) {
+      const key = keys[(Math.floor(Math.random() * keys.length) + attempt) % keys.length];
+      try {
+        const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: GROQ_MODEL,
+            temperature: 0,
+            max_tokens: 1800,
+            messages: [{ role: 'user', content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: image } }
+            ] }]
+          })
+        });
+        const j = await r.json();
+        if (!r.ok) {
+          lastErr = new Error(j.error?.message || `Groq HTTP ${r.status}`);
+          if (r.status === 401 || r.status === 429 || r.status >= 500) continue;
+          return res.status(r.status).json({ ok: false, error: lastErr.message });
+        }
+        const text = j.choices?.[0]?.message?.content || '';
+        const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        const out = JSON.parse(clean);
+        if (!Array.isArray(out.board) || out.board.length !== 10 || out.board.some(row => !Array.isArray(row) || row.length !== 9)) {
+          return res.status(422).json({ ok: false, error: 'OCR trả về ma trận không hợp lệ' });
+        }
+        return res.status(200).json({ ok: true, board: out.board, pieces: Number(out.pieces) || 0, confidence: Number(out.confidence) || 0 });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    return res.status(502).json({ ok: false, error: lastErr ? lastErr.message : 'OCR thất bại' });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
-  return res.status(502).json({ ok:false, error:lastError });
-}
+};
